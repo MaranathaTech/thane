@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1e1e22"/>
+      <stop offset="100%" stop-color="#141416"/>
+    </linearGradient>
+  </defs>
+  <!-- Rounded square background -->
+  <rect x="32" y="32" width="960" height="960" rx="192" ry="192" fill="url(#bg)"/>
+  <!-- Subtle border -->
+  <rect x="32" y="32" width="960" height="960" rx="192" ry="192" fill="none" stroke="#2a2a2e" stroke-width="4"/>
+  <!-- White lowercase "t" in JetBrains Mono Bold style -->
+  <text x="512" y="700" font-family="'JetBrains Mono', 'SF Mono', 'Menlo', monospace" font-size="620" font-weight="700" fill="#ffffff" text-anchor="middle" dominant-baseline="auto">t</text>
+</svg>

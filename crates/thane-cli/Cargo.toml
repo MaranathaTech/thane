@@ -1,0 +1,26 @@
+[package]
+name = "thane-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI binary for controlling thane via socket API"
+
+[[bin]]
+name = "thane-cli"
+path = "src/main.rs"
+
+[dependencies]
+thane-rpc.workspace = true
+thane-core.workspace = true
+thane-ipc.workspace = true
+clap.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+base64.workspace = true
+dirs.workspace = true
+nix.workspace = true

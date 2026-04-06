@@ -1,0 +1,29 @@
+# Rust
+/target/
+**/*.rs.bk
+# Cargo.lock is tracked for reproducible builds
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+/builddir/
+/_build/
+marketing/public/releases/
+*.tar.gz
+meta_err.txt
+
+# Environment
+.env
+.env.local
+
+# Session artifacts
+todo.md

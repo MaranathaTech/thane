@@ -1,0 +1,73 @@
+# Maintainer: thane contributors
+pkgname=thane
+pkgver=0.1.0-beta.17
+pkgrel=1
+pkgdesc="AI-native terminal workspace manager for Linux"
+arch=('x86_64')
+url="https://github.com/thane-term/thane"
+license=('AGPL-3.0-or-later')
+depends=(
+    'gtk4'
+    'vte4'
+    'webkit2gtk-5.0'
+    'dbus'
+)
+makedepends=(
+    'rust'
+    'cargo'
+    'meson'
+    'glib2'
+)
+optdepends=(
+    'ghostty: for Ghostty-compatible terminal configuration'
+)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+
+    # Binaries
+    install -Dm755 "target/release/thane" "$pkgdir/usr/bin/thane"
+    install -Dm755 "target/release/thane-cli" "$pkgdir/usr/bin/thane-cli"
+
+    # Desktop file
+    install -Dm644 "data/com.thane.app.desktop" \
+        "$pkgdir/usr/share/applications/com.thane.app.desktop"
+
+    # AppStream metadata
+    install -Dm644 "data/com.thane.app.metainfo.xml" \
+        "$pkgdir/usr/share/metainfo/com.thane.app.metainfo.xml"
+
+    # GSettings schema
+    install -Dm644 "data/com.thane.app.gschema.xml" \
+        "$pkgdir/usr/share/glib-2.0/schemas/com.thane.app.gschema.xml"
+
+    # Icon
+    install -Dm644 "data/icons/hicolor/scalable/apps/com.thane.app.svg" \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.thane.app.svg"
+
+    # Man pages
+    install -Dm644 "doc/thane.1" "$pkgdir/usr/share/man/man1/thane.1"
+    install -Dm644 "doc/thane-cli.1" "$pkgdir/usr/share/man/man1/thane-cli.1"
+
+    # systemd user service
+    install -Dm644 "data/thane.service" \
+        "$pkgdir/usr/lib/systemd/user/thane.service"
+
+    # License
+    install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

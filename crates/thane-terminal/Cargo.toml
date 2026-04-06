@@ -1,0 +1,23 @@
+[package]
+name = "thane-terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Terminal engine abstraction and VTE4 backend for thane"
+
+[features]
+default = ["vte-backend"]
+vte-backend = ["dep:gtk4", "dep:glib", "dep:gdk4", "dep:vte4", "dep:thane-platform"]
+
+[dependencies]
+thane-core.workspace = true
+thane-platform = { workspace = true, optional = true }
+gtk4 = { workspace = true, optional = true }
+glib = { workspace = true, optional = true }
+gdk4 = { workspace = true, optional = true }
+vte4 = { workspace = true, optional = true }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]

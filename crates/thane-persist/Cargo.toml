@@ -1,0 +1,17 @@
+[package]
+name = "thane-persist"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Session persistence for thane"
+
+[dependencies]
+thane-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]

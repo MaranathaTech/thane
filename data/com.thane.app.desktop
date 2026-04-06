@@ -1,0 +1,19 @@
+[Desktop Entry]
+Name=thane
+GenericName=Terminal
+Comment=AI-native terminal workspace manager
+Exec=thane %U
+Icon=com.thane.app
+Terminal=false
+Type=Application
+Categories=System;TerminalEmulator;Development;
+Keywords=terminal;shell;workspace;ai;agent;coding;
+MimeType=x-scheme-handler/thane;
+StartupNotify=true
+StartupWMClass=thane
+X-GNOME-UsesNotifications=true
+Actions=new-workspace;
+
+[Desktop Action new-workspace]
+Name=New Workspace
+Exec=thane-cli workspace create --title "New"

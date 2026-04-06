@@ -1,0 +1,32 @@
+[package]
+name = "thane-bridge"
+version.workspace = true
+# UniFFI 0.28 does not support Rust edition 2024 (#[unsafe] attribute syntax).
+# This crate uses edition 2021 until UniFFI adds 2024 support.
+edition = "2021"
+license.workspace = true
+description = "UniFFI bridge exposing thane Rust core to Swift/Kotlin"
+
+[lib]
+crate-type = ["lib", "staticlib"]
+name = "thane_bridge"
+
+[dependencies]
+thane-core.workspace = true
+thane-rpc.workspace = true
+thane-persist.workspace = true
+thane-platform.workspace = true
+thane-ipc.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+uniffi = { workspace = true, features = ["cli"] }
+
+[build-dependencies]
+uniffi = { workspace = true, features = ["build"] }
+
+[dev-dependencies]

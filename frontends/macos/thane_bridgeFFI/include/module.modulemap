@@ -1,0 +1,4 @@
+module thane_bridgeFFI {
+    header "thane_bridgeFFI.h"
+    export *
+}

@@ -1,0 +1,144 @@
+.TH THANE 1 "2026-03-20" "thane 0.1.0" "User Commands"
+.SH NAME
+thane \- AI-native terminal workspace manager
+.SH SYNOPSIS
+.B thane
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B thane
+is a workspace manager for AI coding agents on Linux. It combines a terminal
+emulator (VTE), embedded browser (WebKitGTK), and rich sidebar metadata into
+project-centric workspaces that are fully scriptable via a JSON-RPC socket API.
+.PP
+Each workspace contains a split-pane tree of terminal and browser panels,
+with sidebar metadata including git branch, open ports, and notifications.
+.SH OPTIONS
+.TP
+.B \-\-help
+Print help information and exit.
+.TP
+.B \-\-version
+Print version information and exit.
+.SH KEYBOARD SHORTCUTS
+.SS Workspace Management
+.TP
+.B Ctrl+Shift+T
+Create a new workspace.
+.TP
+.B Ctrl+Shift+W
+Close the active workspace.
+.TP
+.B Ctrl+Tab
+Switch to the next workspace.
+.TP
+.B Ctrl+Shift+Tab
+Switch to the previous workspace.
+.TP
+.B Ctrl+B
+Enter leader key mode (tmux-style prefix).
+.SS Leader Key Mode (after Ctrl+B)
+.TP
+.B n
+Next workspace.
+.TP
+.B p
+Previous workspace.
+.TP
+.B c
+Create workspace.
+.TP
+.B x
+Close workspace.
+.TP
+.B ,
+Rename workspace.
+.TP
+.B 1\-9
+Jump to workspace by number.
+.SS Split Panes
+.TP
+.B Ctrl+Shift+D
+Split the focused pane to the right.
+.TP
+.B Ctrl+Shift+E
+Split the focused pane downward.
+.TP
+.B Ctrl+Shift+X
+Close the focused pane.
+.TP
+.B Alt+H, Alt+J, Alt+K, Alt+L
+Focus the pane to the left, below, above, or to the right.
+.TP
+.B Ctrl+Shift+Z
+Toggle zoom on the focused pane.
+.SS General
+.TP
+.B Ctrl+Shift+B
+Toggle sidebar visibility.
+.TP
+.B Ctrl+I
+Toggle notification panel.
+.TP
+.B Ctrl+Shift+C
+Copy selected text.
+.TP
+.B Ctrl+Shift+V
+Paste from clipboard.
+.TP
+.B F11
+Toggle fullscreen.
+.SH ENVIRONMENT
+The following environment variables are set in shells spawned by thane:
+.TP
+.B THANE_WORKSPACE_ID
+UUID of the workspace containing the terminal.
+.TP
+.B THANE_SURFACE_ID
+UUID of the terminal panel.
+.TP
+.B THANE_SOCKET_PATH
+Path to the Unix domain socket for the JSON-RPC API.
+.SH FILES
+.TP
+.I ~/.config/thane/config
+Per-user configuration file (Ghostty-compatible key=value format).
+.TP
+.I ~/.config/ghostty/config
+Ghostty configuration file (read as fallback).
+.TP
+.I $XDG_RUNTIME_DIR/thane/thane.sock
+Unix domain socket for the JSON-RPC API.
+.TP
+.I ~/.local/share/thane/sessions/
+Session persistence directory (auto-saved every 8 seconds).
+.SH EXAMPLES
+Launch thane:
+.PP
+.RS
+.B thane
+.RE
+.PP
+Control from another terminal:
+.PP
+.RS
+.B thane-cli workspace list
+.RE
+.PP
+Send a notification from within a spawned shell:
+.PP
+.RS
+.nf
+echo '{"jsonrpc":"2.0","method":"notification.send",
+  "params":{"title":"Build","body":"Done"},"id":1}' \\
+  | socat - UNIX-CONNECT:$THANE_SOCKET_PATH
+.fi
+.RE
+.SH SEE ALSO
+.BR thane-cli (1),
+.BR ghostty (1),
+.BR tmux (1),
+.BR zellij (1)
+.SH AUTHORS
+thane contributors.
+.SH LICENSE
+AGPL-3.0-or-later. Commercial licensing available.

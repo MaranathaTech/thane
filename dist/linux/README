@@ -1,0 +1,47 @@
+thane — AI-native terminal workspace manager
+=============================================
+
+Quick install
+-------------
+
+  ./install.sh
+
+This installs the binaries, desktop entry, and icon. It will prompt for
+sudo to copy binaries to /usr/local/bin and install runtime dependencies
+if needed.
+
+Manual install
+--------------
+
+1. Install runtime dependencies (Ubuntu/Debian):
+
+     sudo apt install libgtk-4-1 libvte-2.91-gtk4-0 libwebkitgtk-6.0-4
+
+   Fedora:
+
+     sudo dnf install gtk4 vte291-gtk4 webkitgtk6.0
+
+2. Copy binaries:
+
+     sudo install -m 755 thane /usr/local/bin/thane
+     sudo install -m 755 thane-cli /usr/local/bin/thane-cli
+
+3. (Optional) Install desktop entry and icon:
+
+     cp com.thane.app.desktop ~/.local/share/applications/
+     mkdir -p ~/.local/share/icons/hicolor/scalable/apps
+     cp com.thane.app.svg ~/.local/share/icons/hicolor/scalable/apps/
+
+4. Launch:
+
+     thane
+
+Uninstall
+---------
+
+  sudo rm /usr/local/bin/thane /usr/local/bin/thane-cli
+  rm ~/.local/share/applications/com.thane.app.desktop
+  rm ~/.local/share/icons/hicolor/scalable/apps/com.thane.app.svg
+
+Documentation:  https://getthane.com/docs
+Contact:        https://getthane.com/contact

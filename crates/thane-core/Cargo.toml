@@ -1,0 +1,21 @@
+[package]
+name = "thane-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Platform-agnostic business logic for thane"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+dirs.workspace = true
+sha2 = "0.10"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libproc = "0.14"
+
+[dev-dependencies]

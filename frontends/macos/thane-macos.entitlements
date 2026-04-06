@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- App Sandbox: disabled for beta — terminal workspace apps need access
+         to arbitrary filesystem paths, user-installed binaries (e.g. ~/.local/bin),
+         and keychain items from other apps (Claude Code OAuth credentials).
+         Re-evaluate for Mac App Store distribution with proper temporary exceptions. -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+
+    <!-- Network client for WKWebView browser panels -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- Network server for IPC socket (thane-cli communication) -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!-- File access for workspace directories chosen by user -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+
+    <!-- Downloads folder access for export operations (audit JSON, etc.) -->
+    <key>com.apple.security.files.downloads.read-write</key>
+    <true/>
+
+    <!-- Process spawning for terminal shells (PTY) -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- Disable library validation for Rust dylib (libthane_bridge) -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

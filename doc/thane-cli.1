@@ -1,0 +1,132 @@
+.TH THANE-CLI 1 "2026-03-20" "thane 0.1.0" "User Commands"
+.SH NAME
+thane-cli \- command-line client for thane
+.SH SYNOPSIS
+.B thane-cli
+[\fIOPTIONS\fR] \fICOMMAND\fR [\fIARGS\fR]
+.SH DESCRIPTION
+.B thane-cli
+is the command-line client for controlling a running
+.BR thane (1)
+instance via its JSON-RPC socket API. It can manage workspaces, split panes,
+control the embedded browser, and query notifications.
+.SH OPTIONS
+.TP
+.BI \-\-socket " PATH"
+Path to the Unix domain socket. Defaults to
+.IR $THANE_SOCKET_PATH ,
+or
+.IR $XDG_RUNTIME_DIR/thane/thane.sock .
+.TP
+.B \-\-help
+Print help information and exit.
+.TP
+.B \-\-version
+Print version information and exit.
+.SH COMMANDS
+.SS System
+.TP
+.B ping
+Check if thane is running. Exits 0 on success.
+.SS Workspace
+.TP
+.B workspace list
+List all workspaces with their IDs, titles, and CWDs.
+.TP
+.B workspace create \fB\-\-title\fR \fITITLE\fR \fB\-\-cwd\fR \fIPATH\fR
+Create a new workspace.
+.TP
+.B workspace select \fIINDEX\fR
+Switch to a workspace by index (0-based).
+.TP
+.B workspace close
+Close the active workspace.
+.TP
+.B workspace rename \fITITLE\fR
+Rename the active workspace.
+.SS Surface (Pane)
+.TP
+.B surface split\-right
+Split the focused pane horizontally (new pane to the right).
+.TP
+.B surface split\-down
+Split the focused pane vertically (new pane below).
+.TP
+.B surface close
+Close the focused pane.
+.TP
+.B surface focus\-next
+Focus the next pane.
+.TP
+.B surface focus\-prev
+Focus the previous pane.
+.SS Browser
+.TP
+.B browser open \fIURL\fR
+Open a browser panel in a new split with the given URL.
+.TP
+.B browser navigate \fIPANEL_ID\fR \fIURL\fR
+Navigate a browser panel to a URL.
+.TP
+.B browser eval\-js \fIPANEL_ID\fR \fISCRIPT\fR
+Evaluate JavaScript in a browser panel.
+.TP
+.B browser get\-accessibility\-tree \fIPANEL_ID\fR
+Extract the accessibility tree from a browser panel.
+.TP
+.B browser click\-element \fIPANEL_ID\fR \fISELECTOR\fR
+Click an element in a browser panel by CSS selector.
+.TP
+.B browser type\-text \fIPANEL_ID\fR \fISELECTOR\fR \fITEXT\fR
+Type text into an element in a browser panel.
+.SS Notification
+.TP
+.B notification list
+List recent notifications for the active workspace.
+.TP
+.B notification send \fB\-\-title\fR \fITITLE\fR \fB\-\-body\fR \fIBODY\fR
+Send a notification to the active workspace.
+.TP
+.B notification clear
+Clear all notifications for the active workspace.
+.SS Sidebar
+.TP
+.B sidebar toggle
+Toggle sidebar visibility.
+.TP
+.B sidebar status
+Show sidebar metadata for the active workspace.
+.SH ENVIRONMENT
+.TP
+.B THANE_SOCKET_PATH
+Path to the Unix domain socket. Overrides the default location.
+.SH EXAMPLES
+Check if thane is running:
+.PP
+.RS
+.B thane-cli ping
+.RE
+.PP
+Create a workspace for a project:
+.PP
+.RS
+.B thane-cli workspace create \-\-title "my-app" \-\-cwd ~/projects/my-app
+.RE
+.PP
+Open a dev server in the embedded browser:
+.PP
+.RS
+.B thane-cli browser open http://localhost:3000
+.RE
+.PP
+Get page title via JavaScript:
+.PP
+.RS
+.B thane-cli browser eval-js <panel-id> "document.title"
+.RE
+.SH SEE ALSO
+.BR thane (1)
+.SH AUTHORS
+thane contributors.
+.SH LICENSE
+AGPL-3.0-or-later. Commercial licensing available.

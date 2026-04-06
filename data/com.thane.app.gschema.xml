@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="com.thane.app" path="/com/thane/app/">
+    <key name="sidebar-visible" type="b">
+      <default>true</default>
+      <summary>Sidebar visibility</summary>
+      <description>Whether the workspace sidebar is visible</description>
+    </key>
+    <key name="sidebar-width" type="i">
+      <default>220</default>
+      <summary>Sidebar width</summary>
+      <description>Width of the sidebar in pixels</description>
+    </key>
+    <key name="window-width" type="i">
+      <default>1200</default>
+      <summary>Window width</summary>
+      <description>Default window width</description>
+    </key>
+    <key name="window-height" type="i">
+      <default>800</default>
+      <summary>Window height</summary>
+      <description>Default window height</description>
+    </key>
+    <key name="window-maximized" type="b">
+      <default>false</default>
+      <summary>Window maximized</summary>
+      <description>Whether the window is maximized</description>
+    </key>
+  </schema>
+</schemalist>

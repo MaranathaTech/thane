@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.thane.app</id>
+  <name>thane</name>
+  <summary>AI-native terminal workspace manager</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-or-later</project_license>
+
+  <developer id="com.thane">
+    <name>thane contributors</name>
+  </developer>
+
+  <description>
+    <p>
+      thane is a workspace manager for AI coding agents. It combines a
+      terminal emulator, embedded browser, and rich sidebar metadata into
+      project-centric workspaces that are fully scriptable via a socket API.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Multi-workspace terminal with vertical sidebar tabs</li>
+      <li>Split panes with directional navigation</li>
+      <li>Embedded browser with JS scripting API</li>
+      <li>OSC notification system with desktop integration</li>
+      <li>JSON-RPC socket API for programmatic control</li>
+      <li>Session persistence across restarts</li>
+      <li>Agent activity monitoring and cost tracking</li>
+      <li>Ghostty-compatible configuration</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">com.thane.app.desktop</launchable>
+
+  <url type="homepage">https://github.com/thane-term/thane</url>
+  <url type="bugtracker">https://github.com/thane-term/thane/issues</url>
+  <url type="vcs-browser">https://github.com/thane-term/thane</url>
+
+  <provides>
+    <binary>thane</binary>
+    <binary>thane-cli</binary>
+  </provides>
+
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+
+  <categories>
+    <category>System</category>
+    <category>TerminalEmulator</category>
+    <category>Development</category>
+  </categories>
+
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="0.1.0" date="2026-03-20">
+      <description>
+        <p>Initial release with core terminal and workspace features.</p>
+        <ul>
+          <li>Multi-workspace terminal with vertical sidebar tabs</li>
+          <li>Split panes with vim-style directional navigation</li>
+          <li>Embedded WebKitGTK browser with JS scripting</li>
+          <li>JSON-RPC socket API for programmatic control</li>
+          <li>Session persistence across restarts</li>
+          <li>OSC notification pipeline with desktop integration</li>
+          <li>Ghostty-compatible configuration</li>
+          <li>Leader key mode (tmux-style Ctrl+B prefix)</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
+</component>

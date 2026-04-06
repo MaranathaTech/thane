@@ -1,0 +1,89 @@
+[workspace]
+members = [
+    "crates/thane-core",
+    "crates/thane-rpc",
+    "crates/thane-ipc",
+    "crates/thane-persist",
+    "crates/thane-platform",
+    "crates/thane-terminal",
+    "crates/thane-browser",
+    "crates/thane-gtk",
+    "crates/thane-cli",
+    "crates/thane-bridge",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0-beta.17"
+edition = "2024"
+authors = ["thane contributors"]
+license = "LicenseRef-Proprietary"
+repository = "https://github.com/MaranathaTech/thane"
+
+[workspace.dependencies]
+# Internal crates
+thane-core = { path = "crates/thane-core" }
+thane-rpc = { path = "crates/thane-rpc" }
+thane-ipc = { path = "crates/thane-ipc" }
+thane-persist = { path = "crates/thane-persist" }
+thane-platform = { path = "crates/thane-platform" }
+thane-terminal = { path = "crates/thane-terminal" }
+thane-browser = { path = "crates/thane-browser" }
+thane-gtk = { path = "crates/thane-gtk" }
+thane-bridge = { path = "crates/thane-bridge" }
+
+# GTK ecosystem
+gtk4 = { version = "0.10", features = ["v4_12"] }
+glib = "0.21"
+gio = "0.21"
+gdk4 = "0.10"
+vte4 = { version = "0.9", features = ["v0_76"] }
+webkit6 = "0.5"
+javascriptcore6 = "0.5"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# FFI
+uniffi = "0.28"
+
+# Utilities
+base64 = "0.22"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+notify-rust = "4"
+libc = "0.2"
+nix = { version = "0.29", features = ["process", "signal", "net", "user"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "6"
+ureq = "3"
+
+[package]
+name = "thane"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thane-gtk = { workspace = true }
+thane-core = { workspace = true }
+thane-ipc = { workspace = true }
+thane-rpc = { workspace = true }
+thane-platform = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing.workspace = true
+tracing-subscriber.workspace = true

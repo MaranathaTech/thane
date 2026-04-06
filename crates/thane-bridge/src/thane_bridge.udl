@@ -1,0 +1,384 @@
+namespace thane_bridge {};
+
+// ─── Enums ─────────────────────────────────────────────────
+
+enum SplitOrientation {
+    "Horizontal",
+    "Vertical",
+};
+
+enum BridgePanelType {
+    "Terminal",
+    "Browser",
+};
+
+enum BridgeEnforcementLevel {
+    "Permissive",
+    "Enforcing",
+    "Strict",
+};
+
+enum BridgeAuditSeverity {
+    "Info",
+    "Warning",
+    "Alert",
+    "Critical",
+};
+
+enum BridgeQueueEntryStatus {
+    "Queued",
+    "Running",
+    "PausedTokenLimit",
+    "PausedByUser",
+    "Completed",
+    "Failed",
+    "Cancelled",
+};
+
+enum BridgeNotifyUrgency {
+    "Low",
+    "Normal",
+    "Critical",
+};
+
+// ─── Data transfer records ─────────────────────────────────
+
+dictionary WorkspaceInfo {
+    string id;
+    string title;
+    string cwd;
+    string? tag;
+    u64 pane_count;
+    u64 panel_count;
+    u64 unread_notifications;
+};
+
+dictionary PanelInfo {
+    string id;
+    BridgePanelType panel_type;
+    string title;
+    string location;
+    boolean has_unread;
+};
+
+dictionary SplitResult {
+    string pane_id;
+    string panel_id;
+};
+
+dictionary NotificationInfo {
+    string id;
+    string panel_id;
+    string title;
+    string body;
+    BridgeNotifyUrgency urgency;
+    string timestamp;
+    boolean read;
+};
+
+dictionary AuditEventInfo {
+    string id;
+    string timestamp;
+    string workspace_id;
+    string? panel_id;
+    string event_type;
+    BridgeAuditSeverity severity;
+    string description;
+    string metadata_json;
+};
+
+dictionary QueueEntryInfo {
+    string id;
+    string content;
+    string? workspace_id;
+    i32 priority;
+    BridgeQueueEntryStatus status;
+    string created_at;
+    string? started_at;
+    string? completed_at;
+    string? error;
+    u64 input_tokens;
+    u64 output_tokens;
+    f64 estimated_cost_usd;
+    string? model;
+    string? depends_on;
+};
+
+dictionary ConfigEntry {
+    string key;
+    string value;
+};
+
+dictionary SandboxInfo {
+    boolean enabled;
+    string root_dir;
+    sequence<string> read_only_paths;
+    sequence<string> read_write_paths;
+    sequence<string> denied_paths;
+    boolean allow_network;
+    u64? max_open_files;
+    u64? max_write_bytes;
+    u64? max_cpu_seconds;
+    BridgeEnforcementLevel enforcement;
+};
+
+dictionary SandboxCommand {
+    string executable;
+    sequence<string> args;
+    sequence<string> extra_env;
+};
+
+dictionary SessionInfo {
+    boolean restored;
+    u64 workspace_count;
+};
+
+dictionary TokenLimitsDTO {
+    string plan_name;
+    boolean has_caps;
+    string display_mode;
+    double? five_hour_utilization;
+    string? five_hour_resets_at;
+    double? seven_day_utilization;
+    string? seven_day_resets_at;
+};
+
+dictionary ProjectCostDTO {
+    double session_cost_usd;
+    u64 session_input_tokens;
+    u64 session_output_tokens;
+    u64 session_cache_read_tokens;
+    u64 session_cache_write_tokens;
+    double alltime_cost_usd;
+    u64 alltime_input_tokens;
+    u64 alltime_output_tokens;
+    u64 alltime_cache_read_tokens;
+    u64 alltime_cache_write_tokens;
+    u64 session_count;
+    string plan_name;
+    string display_mode;
+    double? five_hour_utilization;
+    double? seven_day_utilization;
+};
+
+dictionary ClosedWorkspaceInfo {
+    string id;
+    string title;
+    string cwd;
+    string? tag;
+    string closed_at;
+};
+
+// ─── Callback interface for UI updates ─────────────────────
+
+callback interface UiCallback {
+    void workspace_changed(string active_id);
+    void workspace_list_changed();
+    void notification_received(string workspace_id, string title, string body);
+    void agent_status_changed(string workspace_id, boolean active);
+    void queue_entry_completed(string entry_id, boolean success);
+    void pane_layout_changed(string workspace_id);
+    void config_changed();
+};
+
+// ─── Error type ────────────────────────────────────────────
+
+[Error]
+enum BridgeError {
+    "WorkspaceNotFound",
+    "PanelNotFound",
+    "PaneNotFound",
+    "InvalidOperation",
+    "ConfigError",
+    "PersistenceError",
+    "IpcError",
+    "Internal",
+};
+
+// ─── Main bridge interface ─────────────────────────────────
+
+interface ThaneBridge {
+    [Throws=BridgeError]
+    constructor(string? config_path);
+
+    // ── Workspace management ──
+
+    [Throws=BridgeError]
+    WorkspaceInfo create_workspace(string title, string cwd);
+
+    sequence<WorkspaceInfo> list_workspaces();
+
+    [Throws=BridgeError]
+    boolean select_workspace(string id);
+
+    [Throws=BridgeError]
+    boolean close_workspace(string id);
+
+    [Throws=BridgeError]
+    boolean rename_workspace(string id, string title);
+
+    WorkspaceInfo? active_workspace();
+
+    // ── Pane / split operations ──
+
+    [Throws=BridgeError]
+    SplitResult split_terminal(SplitOrientation orientation);
+
+    [Throws=BridgeError]
+    SplitResult split_browser(string url, SplitOrientation orientation);
+
+    [Throws=BridgeError]
+    void close_pane();
+
+    void focus_next_pane();
+    void focus_prev_pane();
+
+    [Throws=BridgeError]
+    void focus_direction(string direction);
+
+    // ── Panel management ──
+
+    [Throws=BridgeError]
+    string add_browser_panel(string url);
+
+    [Throws=BridgeError]
+    boolean close_panel(string panel_id);
+
+    boolean select_panel(string panel_id);
+    boolean reorder_panel(string panel_id, u32 new_index);
+    void next_panel();
+    void prev_panel();
+
+    sequence<PanelInfo> list_panels();
+    PanelInfo? focused_panel();
+
+    // ── Notifications ──
+
+    sequence<NotificationInfo> list_notifications(string? workspace_id);
+    void mark_notification_read(string notification_id);
+    void mark_all_notifications_read();
+    void clear_notifications();
+    u64 unread_notification_count();
+
+    // ── Audit log ──
+
+    sequence<AuditEventInfo> list_audit_events(BridgeAuditSeverity? min_severity);
+    string export_audit_json();
+    void clear_audit_log();
+
+    // ── Agent queue ──
+
+    string queue_submit(string content, string? workspace_id, i32 priority);
+    string queue_submit_with_depends(string content, string? workspace_id, i32 priority, string? depends_on);
+    sequence<QueueEntryInfo> queue_list();
+    QueueEntryInfo? queue_status(string entry_id);
+    boolean queue_cancel(string entry_id);
+    boolean queue_retry(string entry_id);
+
+    // ── Configuration ──
+
+    string? config_get(string key);
+    void config_set(string key, string value);
+    sequence<ConfigEntry> config_all();
+    string config_font_family();
+    f64 config_font_size();
+
+    // ── Queue sandbox ──
+
+    SandboxInfo? queue_sandbox_status();
+
+    [Throws=BridgeError]
+    void queue_sandbox_enable();
+
+    void queue_sandbox_disable();
+
+    [Throws=BridgeError]
+    void queue_sandbox_set_enforcement(BridgeEnforcementLevel level);
+
+    [Throws=BridgeError]
+    void queue_sandbox_set_network(boolean allow);
+
+    // ── Sandbox ──
+
+    SandboxInfo? sandbox_status(string workspace_id);
+
+    [Throws=BridgeError]
+    void sandbox_enable(string workspace_id);
+
+    void sandbox_disable(string workspace_id);
+
+    [Throws=BridgeError]
+    void sandbox_set_enforcement(string workspace_id, BridgeEnforcementLevel level);
+
+    [Throws=BridgeError]
+    void sandbox_set_network(string workspace_id, boolean allow);
+
+    [Throws=BridgeError]
+    void sandbox_allow_path(string workspace_id, string path, boolean writable);
+
+    [Throws=BridgeError]
+    void sandbox_deny_path(string workspace_id, string path);
+
+    SandboxCommand? sandbox_get_command(string workspace_id, string shell);
+
+    // ── Session persistence ──
+
+    [Throws=BridgeError]
+    void save_session();
+
+    [Throws=BridgeError]
+    SessionInfo restore_session();
+
+    // ── IPC server lifecycle ──
+
+    // ── Agent detection ──
+
+    string detect_agent_for_pids(sequence<i32> pids);
+
+    // ── Cost & token limits ──
+
+    TokenLimitsDTO get_token_limits();
+    ProjectCostDTO get_project_cost();
+
+    // ── IPC server lifecycle ──
+
+    string socket_path();
+
+    [Throws=BridgeError]
+    void start_ipc_server();
+
+    void stop_ipc_server();
+
+    // ── Browser control ──
+
+    [Throws=BridgeError]
+    void browser_navigate(string panel_id, string url);
+
+    [Throws=BridgeError]
+    string browser_eval_js(string panel_id, string code);
+
+    [Throws=BridgeError]
+    string browser_screenshot(string panel_id);
+
+    [Throws=BridgeError]
+    string browser_get_accessibility_tree(string panel_id);
+
+    [Throws=BridgeError]
+    void browser_click_element(string panel_id, string selector);
+
+    [Throws=BridgeError]
+    void browser_type_text(string panel_id, string text);
+
+    // ── Workspace history ──
+
+    sequence<ClosedWorkspaceInfo> history_list();
+
+    [Throws=BridgeError]
+    WorkspaceInfo history_reopen(string id);
+
+    void history_clear();
+
+    // ── Callback registration ──
+
+    void set_ui_callback(UiCallback callback);
+};

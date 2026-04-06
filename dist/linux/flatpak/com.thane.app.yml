@@ -1,0 +1,47 @@
+app-id: com.thane.app
+runtime: org.gnome.Platform
+runtime-version: '46'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: thane
+
+finish-args:
+  # Display
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  # GPU acceleration
+  - --device=dri
+  # Network access (for embedded browser)
+  - --share=network
+  # Terminal needs PTY access
+  - --talk-name=org.freedesktop.Flatpak
+  # Home directory access (terminal needs file access)
+  - --filesystem=home
+  # Desktop notifications
+  - --talk-name=org.freedesktop.Notifications
+  # Socket API (runtime dir)
+  - --filesystem=xdg-run/thane
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/thane/cargo
+    RUST_BACKTRACE: '1'
+
+modules:
+  - name: thane
+    buildsystem: simple
+    build-commands:
+      - cargo build --release
+      - install -Dm755 target/release/thane /app/bin/thane
+      - install -Dm755 target/release/thane-cli /app/bin/thane-cli
+      - install -Dm644 data/com.thane.app.desktop /app/share/applications/com.thane.app.desktop
+      - install -Dm644 data/com.thane.app.metainfo.xml /app/share/metainfo/com.thane.app.metainfo.xml
+      - install -Dm644 data/com.thane.app.gschema.xml /app/share/glib-2.0/schemas/com.thane.app.gschema.xml
+      - install -Dm644 data/icons/hicolor/scalable/apps/com.thane.app.svg /app/share/icons/hicolor/scalable/apps/com.thane.app.svg
+      - glib-compile-schemas /app/share/glib-2.0/schemas/
+    sources:
+      - type: dir
+        path: ../../..

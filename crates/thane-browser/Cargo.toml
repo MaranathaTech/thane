@@ -1,0 +1,23 @@
+[package]
+name = "thane-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Browser engine abstraction and WebKitGTK6 backend for thane"
+
+[features]
+default = ["webkit-backend"]
+webkit-backend = ["dep:gtk4", "dep:glib", "dep:webkit6", "dep:javascriptcore6"]
+
+[dependencies]
+thane-core.workspace = true
+gtk4 = { workspace = true, optional = true }
+glib = { workspace = true, optional = true }
+webkit6 = { workspace = true, optional = true }
+javascriptcore6 = { workspace = true, optional = true }
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]

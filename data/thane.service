@@ -1,0 +1,22 @@
+[Unit]
+Description=thane - AI-native terminal workspace manager
+Documentation=man:thane(1)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/thane
+Restart=on-failure
+RestartSec=3
+Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=no
+ReadWritePaths=%h
+PrivateTmp=yes
+
+[Install]
+WantedBy=graphical-session.target

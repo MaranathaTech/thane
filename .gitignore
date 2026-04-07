@@ -20,6 +20,9 @@ Thumbs.db
 marketing/public/releases/
 *.tar.gz
 meta_err.txt
+*.dmg
+*.app/
+frontends/macos/.build/
 
 # Environment
 .env

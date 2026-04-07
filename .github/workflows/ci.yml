@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-linux:
+    name: Rust Tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libvte-2.91-gtk4-dev libwebkitgtk-6.0-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
+      - name: Test
+        run: cargo test
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+  rust-macos:
+    name: Rust Tests (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test platform-agnostic crates
+        run: |
+          cargo test -p thane-core
+          cargo test -p thane-rpc
+          cargo test -p thane-persist
+          cargo test -p thane-platform
+          cargo test -p thane-bridge
+          cargo test -p thane-cli
+          cargo test -p thane-ipc
+
+  swift-macos:
+    name: Swift Tests (macOS)
+    runs-on: macos-latest
+    needs: rust-macos
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build Rust bridge
+        run: cargo build --release -p thane-bridge
+
+      - name: Run Swift tests
+        working-directory: frontends/macos
+        run: swift test

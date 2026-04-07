@@ -94,7 +94,7 @@ struct TokenLimitsDTO {
     let sevenDayResetsAt: String?
 }
 
-struct ProjectCostDTO {
+struct ProjectCostDTO: Equatable {
     let sessionCostUsd: Double
     let sessionInputTokens: UInt64
     let sessionOutputTokens: UInt64

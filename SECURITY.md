@@ -4,7 +4,7 @@
 
 If you discover a security vulnerability in thane, please report it responsibly. **Do not open a public GitHub issue.**
 
-Email: **security@getthane.com**
+Report via our **[contact form](https://getthane.com/contact)** with "Security" as the subject.
 
 Include:
 

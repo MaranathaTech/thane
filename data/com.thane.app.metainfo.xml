@@ -31,9 +31,9 @@
 
   <launchable type="desktop-id">com.thane.app.desktop</launchable>
 
-  <url type="homepage">https://github.com/thane-term/thane</url>
-  <url type="bugtracker">https://github.com/thane-term/thane/issues</url>
-  <url type="vcs-browser">https://github.com/thane-term/thane</url>
+  <url type="homepage">https://github.com/MaranathaTech/thane</url>
+  <url type="bugtracker">https://github.com/MaranathaTech/thane/issues</url>
+  <url type="vcs-browser">https://github.com/MaranathaTech/thane</url>
 
   <provides>
     <binary>thane</binary>

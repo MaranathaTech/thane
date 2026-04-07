@@ -4,7 +4,7 @@ pkgver=0.1.0-beta.17
 pkgrel=1
 pkgdesc="AI-native terminal workspace manager for Linux"
 arch=('x86_64')
-url="https://github.com/thane-term/thane"
+url="https://github.com/MaranathaTech/thane"
 license=('AGPL-3.0-or-later')
 depends=(
     'gtk4'

@@ -145,6 +145,8 @@ pub(crate) struct AppState {
     seen_prompt_uuids: std::collections::HashSet<String>,
     /// Per-panel detected agent name (e.g. "claude", "codex"). Updated each metadata refresh.
     panel_agents: HashMap<PanelId, String>,
+    /// Per-panel last terminal output time (for agent stall detection).
+    last_output_times: HashMap<PanelId, std::time::Instant>,
     /// CWD currently shown in the git diff panel (None = workspace CWD).
     git_diff_cwd: Option<String>,
     /// When this app instance started (for filtering session costs).
@@ -736,6 +738,7 @@ impl AppState {
                 self.terminal_panels.remove(&pid);
                 self.panel_workspace_map.remove(&pid);
                 self.block_trackers.remove(&pid);
+                self.last_output_times.remove(&pid);
             }
             self.zoomed_pane = None;
 
@@ -842,6 +845,7 @@ impl AppState {
             self.terminal_panels.insert(panel_id, terminal);
             self.block_trackers
                 .insert(panel_id, thane_core::command_block::BlockTracker::new(100));
+            self.last_output_times.remove(&panel_id);
             pairs.push((ws_id, panel_id));
         }
 
@@ -949,6 +953,7 @@ impl AppState {
                 self.terminal_panels.remove(&panel_id);
                 self.browser_panels.remove(&panel_id);
                 self.panel_workspace_map.remove(&panel_id);
+                self.last_output_times.remove(&panel_id);
 
                 if pane_closed {
                     // If it was the last pane with no more panels, close workspace.
@@ -1104,6 +1109,7 @@ impl AppState {
                 self.terminal_panels.remove(&pid);
                 self.browser_panels.remove(&pid);
                 self.panel_workspace_map.remove(&pid);
+                self.last_output_times.remove(&pid);
             }
             self.zoomed_pane = None;
             self.rebuild_active_splits();
@@ -1323,6 +1329,7 @@ impl AppState {
                 ws_id,
                 &self.terminal_panels,
                 &self.panel_workspace_map,
+                &self.last_output_times,
             );
             // Update per-panel agent tracking for audit attribution.
             for (pid, name) in &ws_panel_agents {
@@ -2803,19 +2810,40 @@ fn collect_workspace_pids(
     pids
 }
 
+/// Duration after which an active agent with no terminal output is considered stalled.
+const AGENT_STALL_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Detect agent activity for a workspace by checking child processes of its terminals.
 /// Returns the workspace-level status and a map of panel_id -> agent_name for active agents.
+/// An agent is considered stalled if it is active but its terminal has not produced output
+/// for longer than [`AGENT_STALL_THRESHOLD`].
 fn detect_agent_status_for_workspace(
     ws_id: Uuid,
     terminal_panels: &HashMap<PanelId, TerminalPanel>,
     panel_workspace_map: &HashMap<PanelId, Uuid>,
+    last_output_times: &HashMap<PanelId, std::time::Instant>,
+) -> (thane_core::sidebar::AgentStatus, HashMap<PanelId, String>) {
+    detect_agent_status_for_workspace_at(
+        ws_id,
+        terminal_panels,
+        panel_workspace_map,
+        last_output_times,
+        std::time::Instant::now(),
+    )
+}
+
+/// Inner implementation that accepts `now` for testability.
+fn detect_agent_status_for_workspace_at(
+    ws_id: Uuid,
+    terminal_panels: &HashMap<PanelId, TerminalPanel>,
+    panel_workspace_map: &HashMap<PanelId, Uuid>,
+    last_output_times: &HashMap<PanelId, std::time::Instant>,
+    now: std::time::Instant,
 ) -> (thane_core::sidebar::AgentStatus, HashMap<PanelId, String>) {
     use thane_core::agent::detect_agent_for_pid;
-    use thane_core::sidebar::AgentStatus;
 
-    let mut overall = AgentStatus::Inactive;
-    let mut panel_agents = HashMap::new();
-
+    // Collect per-panel agent detections from live process inspection.
+    let mut detections = Vec::new();
     for (panel_id, ws) in panel_workspace_map {
         if *ws != ws_id {
             continue;
@@ -2823,11 +2851,49 @@ fn detect_agent_status_for_workspace(
         if let Some(tp) = terminal_panels.get(panel_id) {
             let pid = tp.surface().child_pid().map(|p| p as i32);
             let detection = detect_agent_for_pid(pid);
-            if detection.status == AgentStatus::Active {
-                overall = AgentStatus::Active;
-                if let Some(name) = detection.agent_name {
-                    panel_agents.insert(*panel_id, name);
-                }
+            detections.push((*panel_id, detection));
+        }
+    }
+
+    resolve_agent_stall_status(&detections, last_output_times, now)
+}
+
+/// Pure logic for resolving workspace agent status with stall detection.
+/// Takes pre-resolved agent detections (one per panel) and output timestamps.
+/// Returns the aggregate workspace status and a map of panel_id → agent name.
+///
+/// Priority: Active > Stalled > Inactive.
+fn resolve_agent_stall_status(
+    detections: &[(PanelId, thane_core::agent::AgentDetection)],
+    last_output_times: &HashMap<PanelId, std::time::Instant>,
+    now: std::time::Instant,
+) -> (thane_core::sidebar::AgentStatus, HashMap<PanelId, String>) {
+    use thane_core::sidebar::AgentStatus;
+
+    let mut overall = AgentStatus::Inactive;
+    let mut panel_agents = HashMap::new();
+
+    for (panel_id, detection) in detections {
+        if detection.status == AgentStatus::Active {
+            // Check if the agent has produced output recently.
+            let stalled = match last_output_times.get(panel_id) {
+                Some(last) => now.duration_since(*last) > AGENT_STALL_THRESHOLD,
+                // No output ever recorded — treat as stalled.
+                None => true,
+            };
+            let panel_status = if stalled {
+                AgentStatus::Stalled
+            } else {
+                AgentStatus::Active
+            };
+            // Priority: Active > Stalled > Inactive.
+            match (&overall, &panel_status) {
+                (AgentStatus::Inactive, _) => overall = panel_status,
+                (AgentStatus::Stalled, AgentStatus::Active) => overall = AgentStatus::Active,
+                _ => {}
+            }
+            if let Some(name) = &detection.agent_name {
+                panel_agents.insert(*panel_id, name.clone());
             }
         }
     }
@@ -3059,6 +3125,16 @@ fn wire_terminal_notifications(
                         agent,
                     );
                 }
+            }
+        });
+    }
+
+    // Track last terminal output time for agent stall detection.
+    {
+        let state_ref = state.clone();
+        terminal.connect_raw_output(move |_text| {
+            if let Ok(mut s) = state_ref.try_borrow_mut() {
+                s.last_output_times.insert(panel_id, std::time::Instant::now());
             }
         });
     }
@@ -3328,6 +3404,7 @@ impl AppWindow {
             block_trackers: HashMap::new(),
             seen_prompt_uuids: std::collections::HashSet::new(),
             panel_agents: HashMap::new(),
+            last_output_times: HashMap::new(),
             git_diff_cwd: None,
             started_at: std::time::SystemTime::now(),
             queue_schedule: parse_schedule(config.queue_schedule()),
@@ -5068,6 +5145,123 @@ fn is_version_newer(remote: &str, local: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::is_version_newer;
+    use super::{resolve_agent_stall_status, AGENT_STALL_THRESHOLD};
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+    use thane_core::agent::AgentDetection;
+    use thane_core::panel::PanelId;
+    use thane_core::sidebar::AgentStatus;
+    use uuid::Uuid;
+
+    fn make_active(name: &str) -> AgentDetection {
+        AgentDetection {
+            status: AgentStatus::Active,
+            agent_name: Some(name.to_string()),
+        }
+    }
+
+    fn make_inactive() -> AgentDetection {
+        AgentDetection {
+            status: AgentStatus::Inactive,
+            agent_name: None,
+        }
+    }
+
+    #[test]
+    fn stall_no_agents_returns_inactive() {
+        let now = Instant::now();
+        let detections = vec![];
+        let timestamps = HashMap::new();
+        let (status, agents) = resolve_agent_stall_status(&detections, &timestamps, now);
+        assert_eq!(status, AgentStatus::Inactive);
+        assert!(agents.is_empty());
+    }
+
+    #[test]
+    fn stall_active_agent_with_recent_output() {
+        let now = Instant::now();
+        let pid = PanelId::from(Uuid::new_v4());
+        let detections = vec![(pid, make_active("claude"))];
+        let mut timestamps = HashMap::new();
+        timestamps.insert(pid, now - Duration::from_secs(10));
+        let (status, agents) = resolve_agent_stall_status(&detections, &timestamps, now);
+        assert_eq!(status, AgentStatus::Active);
+        assert_eq!(agents.get(&pid).unwrap(), "claude");
+    }
+
+    #[test]
+    fn stall_active_agent_with_old_output() {
+        let now = Instant::now();
+        let pid = PanelId::from(Uuid::new_v4());
+        let detections = vec![(pid, make_active("claude"))];
+        let mut timestamps = HashMap::new();
+        timestamps.insert(pid, now - Duration::from_secs(90));
+        let (status, agents) = resolve_agent_stall_status(&detections, &timestamps, now);
+        assert_eq!(status, AgentStatus::Stalled);
+        assert_eq!(agents.get(&pid).unwrap(), "claude");
+    }
+
+    #[test]
+    fn stall_active_agent_with_no_recorded_output() {
+        let now = Instant::now();
+        let pid = PanelId::from(Uuid::new_v4());
+        let detections = vec![(pid, make_active("codex"))];
+        let timestamps = HashMap::new();
+        let (status, agents) = resolve_agent_stall_status(&detections, &timestamps, now);
+        assert_eq!(status, AgentStatus::Stalled);
+        assert_eq!(agents.get(&pid).unwrap(), "codex");
+    }
+
+    #[test]
+    fn stall_mixed_active_wins_over_stalled() {
+        let now = Instant::now();
+        let stalled_panel = PanelId::from(Uuid::new_v4());
+        let active_panel = PanelId::from(Uuid::new_v4());
+        let detections = vec![
+            (stalled_panel, make_active("claude")),
+            (active_panel, make_active("claude")),
+        ];
+        let mut timestamps = HashMap::new();
+        timestamps.insert(stalled_panel, now - Duration::from_secs(120));
+        timestamps.insert(active_panel, now - Duration::from_secs(5));
+        let (status, _agents) = resolve_agent_stall_status(&detections, &timestamps, now);
+        assert_eq!(status, AgentStatus::Active);
+    }
+
+    #[test]
+    fn stall_inactive_agent_regardless_of_timestamps() {
+        let now = Instant::now();
+        let pid = PanelId::from(Uuid::new_v4());
+        let detections = vec![(pid, make_inactive())];
+        let mut timestamps = HashMap::new();
+        timestamps.insert(pid, now - Duration::from_secs(5));
+        let (status, agents) = resolve_agent_stall_status(&detections, &timestamps, now);
+        assert_eq!(status, AgentStatus::Inactive);
+        assert!(agents.is_empty());
+    }
+
+    #[test]
+    fn stall_boundary_at_exactly_threshold() {
+        let now = Instant::now();
+        let pid = PanelId::from(Uuid::new_v4());
+        let detections = vec![(pid, make_active("claude"))];
+        let mut timestamps = HashMap::new();
+        // Exactly at the threshold — should NOT be stalled (> not >=).
+        timestamps.insert(pid, now - AGENT_STALL_THRESHOLD);
+        let (status, _) = resolve_agent_stall_status(&detections, &timestamps, now);
+        assert_eq!(status, AgentStatus::Active);
+    }
+
+    #[test]
+    fn stall_boundary_one_second_past_threshold() {
+        let now = Instant::now();
+        let pid = PanelId::from(Uuid::new_v4());
+        let detections = vec![(pid, make_active("claude"))];
+        let mut timestamps = HashMap::new();
+        timestamps.insert(pid, now - AGENT_STALL_THRESHOLD - Duration::from_secs(1));
+        let (status, _) = resolve_agent_stall_status(&detections, &timestamps, now);
+        assert_eq!(status, AgentStatus::Stalled);
+    }
 
     #[test]
     fn newer_major() {

@@ -6,7 +6,7 @@
 #
 # This is a template — update the url and sha256 for each release.
 cask "thane" do
-  version "0.1.0-beta.17"
+  version "0.1.0-beta.18"
   sha256 "REPLACE_WITH_SHA256_OF_DMG"
 
   url "https://github.com/MaranathaTech/thane/releases/download/v#{version}/thane-#{version}.dmg"

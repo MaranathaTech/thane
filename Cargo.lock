@@ -2124,7 +2124,7 @@ dependencies = [
 
 [[package]]
 name = "thane"
-version = "0.1.0-beta.17"
+version = "0.1.0-beta.18"
 dependencies = [
  "chrono",
  "clap",
@@ -2142,7 +2142,7 @@ dependencies = [
 
 [[package]]
 name = "thane-bridge"
-version = "0.1.0-beta.17"
+version = "0.1.0-beta.18"
 dependencies = [
  "chrono",
  "serde",
@@ -2161,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "thane-browser"
-version = "0.1.0-beta.17"
+version = "0.1.0-beta.18"
 dependencies = [
  "glib",
  "gtk4",
@@ -2176,7 +2176,7 @@ dependencies = [
 
 [[package]]
 name = "thane-cli"
-version = "0.1.0-beta.17"
+version = "0.1.0-beta.18"
 dependencies = [
  "anyhow",
  "base64",
@@ -2196,7 +2196,7 @@ dependencies = [
 
 [[package]]
 name = "thane-core"
-version = "0.1.0-beta.17"
+version = "0.1.0-beta.18"
 dependencies = [
  "chrono",
  "dirs",
@@ -2211,7 +2211,7 @@ dependencies = [
 
 [[package]]
 name = "thane-gtk"
-version = "0.1.0-beta.17"
+version = "0.1.0-beta.18"
 dependencies = [
  "chrono",
  "dirs",
@@ -2240,7 +2240,7 @@ dependencies = [
 
 [[package]]
 name = "thane-ipc"
-version = "0.1.0-beta.17"
+version = "0.1.0-beta.18"
 dependencies = [
  "libc",
  "nix",
@@ -2255,7 +2255,7 @@ dependencies = [
 
 [[package]]
 name = "thane-persist"
-version = "0.1.0-beta.17"
+version = "0.1.0-beta.18"
 dependencies = [
  "chrono",
  "serde",
@@ -2268,7 +2268,7 @@ dependencies = [
 
 [[package]]
 name = "thane-platform"
-version = "0.1.0-beta.17"
+version = "0.1.0-beta.18"
 dependencies = [
  "dirs",
  "libc",
@@ -2282,7 +2282,7 @@ dependencies = [
 
 [[package]]
 name = "thane-rpc"
-version = "0.1.0-beta.17"
+version = "0.1.0-beta.18"
 dependencies = [
  "serde",
  "serde_json",
@@ -2294,7 +2294,7 @@ dependencies = [
 
 [[package]]
 name = "thane-terminal"
-version = "0.1.0-beta.17"
+version = "0.1.0-beta.18"
 dependencies = [
  "gdk4",
  "glib",

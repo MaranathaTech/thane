@@ -12,7 +12,7 @@ final class StatusBarView: NSView {
     private let leaderLabel = NSTextField(labelWithString: "LEADER")
     private let commandBlockLabel = NSTextField(labelWithString: "")
     private let fontSizeLabel = NSTextField(labelWithString: "13pt")
-    private let versionLabel = NSTextField(labelWithString: "v0.1.0-beta.17")
+    private let versionLabel = NSTextField(labelWithString: "v0.1.0-beta.18")
 
     // Clickable status items
     private var costButton: StatusBarButton!

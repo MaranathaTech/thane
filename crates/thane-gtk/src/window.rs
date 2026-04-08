@@ -1319,10 +1319,21 @@ impl AppState {
             }
 
             // Scan for Claude Code token usage for this project with incremental caching.
+            // Use exact CWD matching (no ancestor walking) so each workspace only
+            // reflects cost from its own terminal CWDs.
             let since_dt = self.started_at.duration_since(std::time::UNIX_EPOCH).ok().and_then(|d| {
                 chrono::DateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos())
             });
-            let cost_summary = self.cost_cache.for_project_detailed(&cwd, since_dt);
+            let mut ws_cwds = std::collections::HashSet::new();
+            ws_cwds.insert(cwd.clone());
+            for (_, panel_cwd) in &terminal_locs {
+                ws_cwds.insert(panel_cwd.clone());
+            }
+            let mut cost_summary = thane_core::cost_tracker::ProjectCostSummary::default();
+            for panel_cwd in &ws_cwds {
+                let sub = self.cost_cache.for_project_exact(panel_cwd, since_dt);
+                cost_summary.merge(&sub);
+            }
 
             // Detect agent activity via child process inspection.
             let (agent_status, ws_panel_agents) = detect_agent_status_for_workspace(

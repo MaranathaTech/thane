@@ -1,6 +1,6 @@
 # Maintainer: thane contributors
 pkgname=thane
-pkgver=0.1.0-beta.18
+pkgver=0.1.0-beta.19
 pkgrel=1
 pkgdesc="AI-native terminal workspace manager for Linux"
 arch=('x86_64')

@@ -29,6 +29,15 @@ pub struct ProjectCostSummary {
     pub sessions: Vec<SessionCost>,
 }
 
+impl ProjectCostSummary {
+    /// Merge another summary into this one (sum tokens/cost, append sessions).
+    pub fn merge(&mut self, other: &ProjectCostSummary) {
+        self.current_session.add(&other.current_session);
+        self.all_time.add(&other.all_time);
+        self.sessions.extend(other.sessions.iter().cloned());
+    }
+}
+
 /// Cost data for a single Claude Code session (one JSONL file).
 #[derive(Debug, Clone)]
 pub struct SessionCost {
@@ -107,12 +116,27 @@ impl CostCache {
     /// Scans the CWD **and all ancestor CWDs** that have matching Claude project
     /// directories. Only re-parses JSONL files that have changed since the last call.
     pub fn for_project_detailed(&mut self, cwd: &str, since: Option<DateTime<Utc>>) -> ProjectCostSummary {
+        let dirs = project_dirs_for_cwd(cwd);
+        self.scan_dirs(&dirs, since)
+    }
+
+    /// Like `for_project_detailed` but only scans the exact CWD's project directory
+    /// (no ancestor walking). Used for per-workspace sidebar costs.
+    pub fn for_project_exact(&mut self, cwd: &str, since: Option<DateTime<Utc>>) -> ProjectCostSummary {
+        match project_dir_for_cwd_exact(cwd) {
+            Some(dir) => self.scan_dirs(&[dir], since),
+            None => ProjectCostSummary::default(),
+        }
+    }
+
+    /// Core scanning logic shared by `for_project_detailed` and `for_project_exact`.
+    fn scan_dirs(&mut self, dirs: &[PathBuf], since: Option<DateTime<Utc>>) -> ProjectCostSummary {
         let mut summary = ProjectCostSummary::default();
 
-        // Collect current files across all matching project directories.
+        // Collect current files across all given project directories.
         let mut current_files: HashMap<PathBuf, (u128, u64)> = HashMap::new();
-        for project_dir in project_dirs_for_cwd(cwd) {
-            let dir_entries = match std::fs::read_dir(&project_dir) {
+        for project_dir in dirs {
+            let dir_entries = match std::fs::read_dir(project_dir) {
                 Ok(e) => e,
                 Err(_) => continue,
             };
@@ -741,6 +765,15 @@ impl CostTracker {
         Self::default()
     }
 
+    /// Add all token counts and cost from another CostTracker into this one.
+    pub fn add(&mut self, other: &CostTracker) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
+        self.cache_write_tokens += other.cache_write_tokens;
+        self.estimated_cost_usd += other.estimated_cost_usd;
+    }
+
     /// Parse Claude Code usage from a projects directory.
     /// Looks for JSONL files in ~/.claude/projects/<project>/ that contain usage data.
     pub fn from_claude_dir(claude_dir: &Path) -> Self {
@@ -983,6 +1016,17 @@ impl CostTracker {
             format!("{:.1}M tokens", total as f64 / 1_000_000.0)
         }
     }
+}
+
+/// Return the single Claude project directory for the exact CWD (no ancestor walking).
+fn project_dir_for_cwd_exact(cwd: &str) -> Option<PathBuf> {
+    let projects_dir = default_claude_dir().join("projects");
+    if !projects_dir.is_dir() {
+        return None;
+    }
+    let mangled = Path::new(cwd).to_string_lossy().replace('/', "-");
+    let dir = projects_dir.join(&mangled);
+    if dir.is_dir() { Some(dir) } else { None }
 }
 
 /// Return all `~/.claude/projects/<mangled>/` directories that correspond to
@@ -1747,6 +1791,128 @@ mod tests {
             info.display_mode_with_override(None),
             CostDisplayMode::Dollar
         );
+    }
+
+    // ── Tests for exact CWD matching and merge ──
+
+    #[test]
+    fn test_project_dir_for_cwd_exact_nonexistent() {
+        // A path that definitely doesn't have a matching Claude project dir.
+        let result = project_dir_for_cwd_exact("/nonexistent/path/abc123");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_project_dir_for_cwd_exact_does_not_walk_ancestors() {
+        // Even if an ancestor has a project dir, exact should not find it.
+        // Use a deep nonexistent path — the parent might have a dir, but exact won't walk.
+        let result = project_dir_for_cwd_exact("/nonexistent/deeply/nested/subdir");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_cost_tracker_add() {
+        let mut a = CostTracker {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 200,
+            cache_write_tokens: 300,
+            estimated_cost_usd: 1.5,
+        };
+        let b = CostTracker {
+            input_tokens: 400,
+            output_tokens: 200,
+            cache_read_tokens: 100,
+            cache_write_tokens: 50,
+            estimated_cost_usd: 2.5,
+        };
+        a.add(&b);
+        assert_eq!(a.input_tokens, 500);
+        assert_eq!(a.output_tokens, 250);
+        assert_eq!(a.cache_read_tokens, 300);
+        assert_eq!(a.cache_write_tokens, 350);
+        assert!((a.estimated_cost_usd - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_project_cost_summary_merge() {
+        let mut summary_a = ProjectCostSummary {
+            current_session: CostTracker {
+                input_tokens: 100,
+                output_tokens: 50,
+                estimated_cost_usd: 1.0,
+                ..Default::default()
+            },
+            all_time: CostTracker {
+                input_tokens: 500,
+                output_tokens: 250,
+                estimated_cost_usd: 5.0,
+                ..Default::default()
+            },
+            sessions: vec![SessionCost {
+                session_id: "session-a".to_string(),
+                first_timestamp: None,
+                last_timestamp: None,
+                cost: CostTracker::new(),
+            }],
+        };
+        let summary_b = ProjectCostSummary {
+            current_session: CostTracker {
+                input_tokens: 200,
+                output_tokens: 100,
+                estimated_cost_usd: 2.0,
+                ..Default::default()
+            },
+            all_time: CostTracker {
+                input_tokens: 1000,
+                output_tokens: 500,
+                estimated_cost_usd: 10.0,
+                ..Default::default()
+            },
+            sessions: vec![SessionCost {
+                session_id: "session-b".to_string(),
+                first_timestamp: None,
+                last_timestamp: None,
+                cost: CostTracker::new(),
+            }],
+        };
+
+        summary_a.merge(&summary_b);
+
+        assert_eq!(summary_a.current_session.input_tokens, 300);
+        assert_eq!(summary_a.current_session.output_tokens, 150);
+        assert!((summary_a.current_session.estimated_cost_usd - 3.0).abs() < 1e-10);
+        assert_eq!(summary_a.all_time.input_tokens, 1500);
+        assert_eq!(summary_a.all_time.output_tokens, 750);
+        assert!((summary_a.all_time.estimated_cost_usd - 15.0).abs() < 1e-10);
+        assert_eq!(summary_a.sessions.len(), 2);
+        assert_eq!(summary_a.sessions[0].session_id, "session-a");
+        assert_eq!(summary_a.sessions[1].session_id, "session-b");
+    }
+
+    #[test]
+    fn test_project_cost_summary_merge_empty() {
+        let mut summary = ProjectCostSummary {
+            current_session: CostTracker {
+                input_tokens: 100,
+                estimated_cost_usd: 1.0,
+                ..Default::default()
+            },
+            all_time: CostTracker {
+                input_tokens: 500,
+                estimated_cost_usd: 5.0,
+                ..Default::default()
+            },
+            sessions: vec![],
+        };
+        let empty = ProjectCostSummary::default();
+        summary.merge(&empty);
+
+        // Should be unchanged.
+        assert_eq!(summary.current_session.input_tokens, 100);
+        assert!((summary.current_session.estimated_cost_usd - 1.0).abs() < 1e-10);
+        assert_eq!(summary.all_time.input_tokens, 500);
+        assert!(summary.sessions.is_empty());
     }
 
 }

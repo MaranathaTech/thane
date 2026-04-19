@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod audit;
+pub mod claude_chat_fetcher;
 pub mod command_block;
 pub mod config;
 pub mod cost_tracker;

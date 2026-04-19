@@ -240,6 +240,15 @@ pub struct AuditEventInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct BridgeChatRecord {
+    pub conversation_id: String,
+    pub name: String,
+    pub org_name: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct QueueEntryInfo {
     pub id: String,
     pub content: String,
@@ -360,6 +369,8 @@ struct BridgeState {
     sessions_dir: PathBuf,
     workspace_history: WorkspaceHistory,
     history_store: HistoryStore,
+    chat_fetcher_state: thane_core::claude_chat_fetcher::ChatFetcherState,
+    chat_fetcher_last_poll: Option<std::time::Instant>,
     ui_callback: Option<Box<dyn UiCallback>>,
 }
 
@@ -402,6 +413,8 @@ impl ThaneBridge {
             sessions_dir,
             workspace_history,
             history_store,
+            chat_fetcher_state: thane_core::claude_chat_fetcher::ChatFetcherState::default(),
+            chat_fetcher_last_poll: None,
             ui_callback: None,
         };
 
@@ -732,6 +745,68 @@ impl ThaneBridge {
         if let Ok(mut s) = self.state.lock() {
             s.audit_log.clear();
         }
+    }
+
+    /// Poll for new Claude.ai conversations. Rate-limited to 60 seconds internally.
+    /// Returns new chat records and logs them as audit events.
+    pub fn poll_claude_app_chats(&self) -> Vec<BridgeChatRecord> {
+        let mut s = match self.state.lock() {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        if !s.config.audit_claude_app_chats() {
+            return Vec::new();
+        }
+
+        let should_poll = s.chat_fetcher_last_poll
+            .map(|t| t.elapsed() > std::time::Duration::from_secs(60))
+            .unwrap_or(true);
+
+        if !should_poll {
+            return Vec::new();
+        }
+
+        let token = match thane_core::cost_tracker::read_oauth_token() {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+
+        let new_chats = thane_core::claude_chat_fetcher::fetch_new_chats(
+            &token,
+            &mut s.chat_fetcher_state,
+        );
+        s.chat_fetcher_last_poll = Some(std::time::Instant::now());
+
+        // Log audit events for new chats.
+        let ws_id = s.workspace_mgr.list().first()
+            .map(|ws| ws.id)
+            .unwrap_or(uuid::Uuid::nil());
+        for chat in &new_chats {
+            let short: String = chat.name.chars().take(100).collect();
+            s.audit_log.log(
+                ws_id,
+                None,
+                AuditEventType::ClaudeAppChat,
+                CoreAuditSeverity::Info,
+                format!("Claude.ai chat: {short}"),
+                serde_json::json!({
+                    "conversation_id": chat.conversation_id,
+                    "name": chat.name,
+                    "org_name": chat.org_name,
+                    "created_at": chat.created_at,
+                    "updated_at": chat.updated_at,
+                }),
+            );
+        }
+
+        new_chats.into_iter().map(|c| BridgeChatRecord {
+            conversation_id: c.conversation_id,
+            name: c.name,
+            org_name: c.org_name,
+            created_at: c.created_at,
+            updated_at: c.updated_at,
+        }).collect()
     }
 
     // ── Agent queue ──

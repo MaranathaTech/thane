@@ -21,6 +21,8 @@ pub struct SettingsPanel {
     link_url_in_app_switch: gtk4::Switch,
     link_url_in_browser_switch: gtk4::Switch,
     sensitive_policy_dropdown: gtk4::DropDown,
+    audit_code_sessions_switch: gtk4::Switch,
+    audit_app_chats_switch: gtk4::Switch,
     queue_mode_dropdown: gtk4::DropDown,
     queue_sandbox_dropdown: gtk4::DropDown,
     queue_schedule_entry: gtk4::Entry,
@@ -290,6 +292,39 @@ impl SettingsPanel {
 
         content.append(&policy_row);
 
+        // Audit Claude Code sessions switch.
+        let audit_code_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let audit_code_lbl = gtk4::Label::new(Some("Audit Claude Code Sessions"));
+        audit_code_lbl.set_hexpand(true);
+        audit_code_lbl.set_halign(gtk4::Align::Start);
+        audit_code_row.append(&audit_code_lbl);
+        let audit_code_sessions_switch = gtk4::Switch::new();
+        audit_code_sessions_switch.set_active(true);
+        audit_code_sessions_switch.set_valign(gtk4::Align::Center);
+        audit_code_sessions_switch.set_tooltip_text(Some("Log prompts from Claude Code CLI sessions"));
+        audit_code_row.append(&audit_code_sessions_switch);
+        content.append(&audit_code_row);
+
+        // Audit Claude.ai chats switch.
+        let audit_app_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let audit_app_lbl = gtk4::Label::new(Some("Audit Claude.ai Chats"));
+        audit_app_lbl.set_hexpand(true);
+        audit_app_lbl.set_halign(gtk4::Align::Start);
+        audit_app_row.append(&audit_app_lbl);
+        let audit_app_chats_switch = gtk4::Switch::new();
+        audit_app_chats_switch.set_active(false);
+        audit_app_chats_switch.set_valign(gtk4::Align::Center);
+        audit_app_chats_switch.set_tooltip_text(Some("Fetch and log Claude.ai conversations (requires OAuth)"));
+        audit_app_row.append(&audit_app_chats_switch);
+        content.append(&audit_app_row);
+
+        let audit_hint = gtk4::Label::new(Some("Uses OAuth token from ~/.claude/.credentials.json"));
+        audit_hint.add_css_class("dim-label");
+        audit_hint.set_halign(gtk4::Align::Start);
+        audit_hint.set_margin_start(4);
+        audit_hint.set_wrap(true);
+        content.append(&audit_hint);
+
         // ── Agent Queue section ──
         let queue_sep = gtk4::Separator::new(gtk4::Orientation::Horizontal);
         queue_sep.set_margin_top(8);
@@ -452,6 +487,8 @@ impl SettingsPanel {
             link_url_in_app_switch,
             link_url_in_browser_switch,
             sensitive_policy_dropdown,
+            audit_code_sessions_switch,
+            audit_app_chats_switch,
             queue_mode_dropdown,
             queue_sandbox_dropdown,
             queue_schedule_entry,
@@ -575,6 +612,20 @@ impl SettingsPanel {
             _ => 1,
         };
         self.sensitive_policy_dropdown.set_selected(idx);
+        self.updating.set(false);
+    }
+
+    /// Set "audit Claude Code sessions" enabled.
+    pub fn set_audit_code_sessions(&self, enabled: bool) {
+        self.updating.set(true);
+        self.audit_code_sessions_switch.set_active(enabled);
+        self.updating.set(false);
+    }
+
+    /// Set "audit Claude.ai chats" enabled.
+    pub fn set_audit_app_chats(&self, enabled: bool) {
+        self.updating.set(true);
+        self.audit_app_chats_switch.set_active(enabled);
         self.updating.set(false);
     }
 
@@ -706,6 +757,26 @@ impl SettingsPanel {
             .connect_selected_notify(move |dd| {
                 if guard.get() { return; }
                 f(dd.selected());
+            });
+    }
+
+    /// Connect callback for "audit Claude Code sessions" changes.
+    pub fn connect_audit_code_sessions_changed<F: Fn(bool) + 'static>(&self, f: F) {
+        let guard = self.updating.clone();
+        self.audit_code_sessions_switch
+            .connect_active_notify(move |switch| {
+                if guard.get() { return; }
+                f(switch.is_active());
+            });
+    }
+
+    /// Connect callback for "audit Claude.ai chats" changes.
+    pub fn connect_audit_app_chats_changed<F: Fn(bool) + 'static>(&self, f: F) {
+        let guard = self.updating.clone();
+        self.audit_app_chats_switch
+            .connect_active_notify(move |switch| {
+                if guard.get() { return; }
+                f(switch.is_active());
             });
     }
 

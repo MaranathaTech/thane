@@ -143,6 +143,10 @@ pub(crate) struct AppState {
     workspace_history: WorkspaceHistory,
     /// UUIDs of Claude prompts already logged to audit (for dedup).
     seen_prompt_uuids: std::collections::HashSet<String>,
+    /// State for the Claude.ai conversation fetcher (org cache + dedup).
+    chat_fetcher_state: thane_core::claude_chat_fetcher::ChatFetcherState,
+    /// When the Claude.ai API was last polled (rate limiting).
+    chat_fetcher_last_poll: Option<std::time::Instant>,
     /// Per-panel detected agent name (e.g. "claude", "codex"). Updated each metadata refresh.
     panel_agents: HashMap<PanelId, String>,
     /// Per-panel last terminal output time (for agent stall detection).
@@ -1356,29 +1360,32 @@ impl AppState {
             let ws_ports = port_scanner::scan_listening_ports(&ws_pids);
 
             // Scan for Claude Code interactive prompts from JSONL session files.
-            let prompts = thane_core::prompt_scanner::scan_project_prompts(&cwd);
-            // Track the last prompt text for sidebar display.
-            let last_prompt_text = prompts.last().map(|p| p.text.clone());
-            for prompt in prompts {
-                if prompt.uuid.is_empty() || !self.seen_prompt_uuids.insert(prompt.uuid.clone()) {
-                    continue;
+            let mut last_prompt_text: Option<String> = None;
+            if self.config.audit_claude_code_sessions() {
+                let prompts = thane_core::prompt_scanner::scan_project_prompts(&cwd);
+                // Track the last prompt text for sidebar display.
+                last_prompt_text = prompts.last().map(|p| p.text.clone());
+                for prompt in prompts {
+                    if prompt.uuid.is_empty() || !self.seen_prompt_uuids.insert(prompt.uuid.clone()) {
+                        continue;
+                    }
+                    // Char-safe truncation for the description.
+                    let short: String = prompt.text.chars().take(100).collect();
+                    let description = format!("Claude prompt: {short}");
+                    self.audit_log.log(
+                        ws_id,
+                        None,
+                        AuditEventType::UserPrompt,
+                        AuditSeverity::Info,
+                        &description,
+                        serde_json::json!({
+                            "prompt": prompt.text,
+                            "session_id": prompt.session_id,
+                            "timestamp": prompt.timestamp,
+                            "uuid": prompt.uuid,
+                        }),
+                    );
                 }
-                // Char-safe truncation for the description.
-                let short: String = prompt.text.chars().take(100).collect();
-                let description = format!("Claude prompt: {short}");
-                self.audit_log.log(
-                    ws_id,
-                    None,
-                    AuditEventType::UserPrompt,
-                    AuditSeverity::Info,
-                    &description,
-                    serde_json::json!({
-                        "prompt": prompt.text,
-                        "session_id": prompt.session_id,
-                        "timestamp": prompt.timestamp,
-                        "uuid": prompt.uuid,
-                    }),
-                );
             }
 
             // Update sidebar metadata for this workspace.
@@ -1397,6 +1404,42 @@ impl AppState {
                 if last_prompt_text.is_some() {
                     ws.sidebar.last_prompt = last_prompt_text;
                 }
+            }
+        }
+
+        // Fetch Claude.ai conversations (if enabled, rate-limited to 60s).
+        if self.config.audit_claude_app_chats() {
+            let should_poll = self.chat_fetcher_last_poll
+                .map(|t| t.elapsed() > std::time::Duration::from_secs(60))
+                .unwrap_or(true);
+            if should_poll
+                && let Some(token) = read_oauth_token()
+            {
+                let first_ws_id = self.workspace_mgr.list().first()
+                    .map(|ws| ws.id)
+                    .unwrap_or(uuid::Uuid::nil());
+                let new_chats = thane_core::claude_chat_fetcher::fetch_new_chats(
+                    &token,
+                    &mut self.chat_fetcher_state,
+                );
+                for chat in new_chats {
+                    let short: String = chat.name.chars().take(100).collect();
+                    self.audit_log.log(
+                        first_ws_id,
+                        None,
+                        AuditEventType::ClaudeAppChat,
+                        AuditSeverity::Info,
+                        format!("Claude.ai chat: {short}"),
+                        serde_json::json!({
+                            "conversation_id": chat.conversation_id,
+                            "name": chat.name,
+                            "org_name": chat.org_name,
+                            "created_at": chat.created_at,
+                            "updated_at": chat.updated_at,
+                        }),
+                    );
+                }
+                self.chat_fetcher_last_poll = Some(std::time::Instant::now());
             }
         }
 
@@ -3310,6 +3353,8 @@ impl AppWindow {
         settings_panel.set_link_url_in_browser(config.link_url_in_browser());
         settings_panel.set_font_color(config.terminal_font_color());
         settings_panel.set_sensitive_policy(config.sensitive_data_policy());
+        settings_panel.set_audit_code_sessions(config.audit_claude_code_sessions());
+        settings_panel.set_audit_app_chats(config.audit_claude_app_chats());
         settings_panel.set_queue_mode(config.queue_mode());
         settings_panel.set_queue_schedule(config.queue_schedule());
         settings_panel.set_queue_sandbox_mode(config.queue_sandbox_mode());
@@ -3414,6 +3459,8 @@ impl AppWindow {
             workspace_history: WorkspaceHistory::new(),
             block_trackers: HashMap::new(),
             seen_prompt_uuids: std::collections::HashSet::new(),
+            chat_fetcher_state: thane_core::claude_chat_fetcher::ChatFetcherState::default(),
+            chat_fetcher_last_poll: None,
             panel_agents: HashMap::new(),
             last_output_times: HashMap::new(),
             git_diff_cwd: None,
@@ -3929,6 +3976,32 @@ impl AppWindow {
                         ws.sensitive_op_action = action;
                     }
                     s.config.set("sensitive-data-policy", name);
+                    s.save_config();
+                });
+        }
+
+        // Wire settings panel: audit Claude Code sessions.
+        {
+            let state_ref = state.clone();
+            state
+                .borrow()
+                .settings_panel
+                .connect_audit_code_sessions_changed(move |enabled| {
+                    let mut s = state_ref.borrow_mut();
+                    s.config.set("audit-claude-code-sessions", &format!("{enabled}"));
+                    s.save_config();
+                });
+        }
+
+        // Wire settings panel: audit Claude.ai chats.
+        {
+            let state_ref = state.clone();
+            state
+                .borrow()
+                .settings_panel
+                .connect_audit_app_chats_changed(move |enabled| {
+                    let mut s = state_ref.borrow_mut();
+                    s.config.set("audit-claude-app-chats", &format!("{enabled}"));
                     s.save_config();
                 });
         }

@@ -25,6 +25,8 @@ final class SettingsPanel: NSView, ReloadablePanel {
 
     // Security
     private let sensitiveDataPopup = NSPopUpButton()
+    private let auditCodeSessionsSwitch = NSSwitch()
+    private let auditAppChatsSwitch = NSSwitch()
 
     // Queue
     private let queueModePopup = NSPopUpButton()
@@ -182,6 +184,22 @@ final class SettingsPanel: NSView, ReloadablePanel {
         sensitiveDataPopup.action = #selector(sensitiveDataChanged)
         sensitiveDataPopup.controlSize = .small
         stack.addArrangedSubview(makeFormRow("Sensitive Data Policy", control: sensitiveDataPopup))
+
+        auditCodeSessionsSwitch.target = self
+        auditCodeSessionsSwitch.action = #selector(auditCodeSessionsChanged)
+        auditCodeSessionsSwitch.controlSize = .small
+        stack.addArrangedSubview(makeFormRow("Audit Claude Code Sessions", control: auditCodeSessionsSwitch))
+
+        auditAppChatsSwitch.target = self
+        auditAppChatsSwitch.action = #selector(auditAppChatsChanged)
+        auditAppChatsSwitch.controlSize = .small
+        stack.addArrangedSubview(makeFormRow("Audit Claude.ai Chats", control: auditAppChatsSwitch))
+
+        let auditHint = makeLabel("Uses OAuth token from ~/.claude/.credentials.json", bold: false, size: 10)
+        auditHint.textColor = ThaneTheme.tertiaryText
+        auditHint.lineBreakMode = .byWordWrapping
+        auditHint.preferredMaxLayoutWidth = 240
+        stack.addArrangedSubview(auditHint)
 
         // ── Agent Queue ──
         stack.addArrangedSubview(makeSectionHeader("Agent Queue"))
@@ -357,6 +375,9 @@ final class SettingsPanel: NSView, ReloadablePanel {
         let sensitivePolicy = bridge.configGet(key: "sensitive-data-policy") ?? "warn"
         sensitiveDataPopup.selectItem(withTitle: sensitivePolicy.capitalized)
 
+        auditCodeSessionsSwitch.state = (bridge.configGet(key: "audit-claude-code-sessions") ?? "true") == "true" ? .on : .off
+        auditAppChatsSwitch.state = (bridge.configGet(key: "audit-claude-app-chats") ?? "false") == "true" ? .on : .off
+
         let queueMode = bridge.configGet(key: "queue-mode") ?? "automatic"
         queueModePopup.selectItem(withTitle: queueMode.capitalized)
         updateScheduleVisibility()
@@ -418,6 +439,14 @@ final class SettingsPanel: NSView, ReloadablePanel {
     @objc private func sensitiveDataChanged() {
         guard let policy = sensitiveDataPopup.titleOfSelectedItem?.lowercased() else { return }
         bridge.configSet(key: "sensitive-data-policy", value: policy)
+    }
+
+    @objc private func auditCodeSessionsChanged() {
+        bridge.configSet(key: "audit-claude-code-sessions", value: auditCodeSessionsSwitch.state == .on ? "true" : "false")
+    }
+
+    @objc private func auditAppChatsChanged() {
+        bridge.configSet(key: "audit-claude-app-chats", value: auditAppChatsSwitch.state == .on ? "true" : "false")
     }
 
     @objc private func costScopeChanged() {

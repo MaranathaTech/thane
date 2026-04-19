@@ -65,6 +65,8 @@ pub enum AuditEventType {
     AgentInvocation,
     /// User prompt sent to Claude Code during an interactive session.
     UserPrompt,
+    /// Conversation detected in the Claude.ai web/desktop app.
+    ClaudeAppChat,
     /// A task was added to the agent queue.
     QueueTaskSubmitted,
     /// A queued task's headless process was spawned.
@@ -1095,5 +1097,13 @@ mod tests {
         let paths = extract_file_paths(&cleaned);
         assert!(paths.contains(&"/home/user/.env".to_string()));
         assert_eq!(is_sensitive_file(&paths[0]), Some(AuditEventType::SecretAccess));
+    }
+
+    #[test]
+    fn test_claude_app_chat_event_type_serialization() {
+        let json = serde_json::to_string(&AuditEventType::ClaudeAppChat).unwrap();
+        assert_eq!(json, "\"claude_app_chat\"");
+        let deserialized: AuditEventType = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, AuditEventType::ClaudeAppChat);
     }
 }

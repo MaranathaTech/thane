@@ -7,7 +7,7 @@
 # This is a template — update the url and sha256 for each release.
 cask "thane" do
   version "0.1.0-beta.20"
-  sha256 "3f4ba5e0729fa914d5e8c11c5fbffab2007dee0cf1e94d26c16b1c1b69e5da93"
+  sha256 "4dc68819f161ed2a2e583df463d25055667d7f182588cd8e49d6934c480fa258"
 
   url "https://github.com/MaranathaTech/thane/releases/download/v#{version}/thane-#{version}.dmg"
   name "thane"

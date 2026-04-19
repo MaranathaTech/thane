@@ -261,6 +261,18 @@ impl Config {
             })
     }
 
+    /// Whether to audit Claude Code CLI sessions (scan JSONL project prompts).
+    /// Default: true (preserves current always-on behavior).
+    pub fn audit_claude_code_sessions(&self) -> bool {
+        self.get_parsed("audit-claude-code-sessions").unwrap_or(true)
+    }
+
+    /// Whether to audit Claude.ai web/desktop app conversations via API.
+    /// Default: false (opt-in, makes API calls using OAuth token).
+    pub fn audit_claude_app_chats(&self) -> bool {
+        self.get_parsed("audit-claude-app-chats").unwrap_or(false)
+    }
+
     /// Set a config value.
     pub fn set(&mut self, key: &str, value: &str) {
         self.values.insert(key.to_string(), value.to_string());
@@ -457,5 +469,31 @@ cursor-style = bar
         assert_eq!(bindings.len(), 2);
         assert_eq!(bindings[0].action, crate::keybinding::KeyAction::WorkspaceNew);
         assert_eq!(bindings[1].action, crate::keybinding::KeyAction::PaneFocusLeft);
+    }
+
+    #[test]
+    fn test_audit_claude_code_sessions_default() {
+        let config = Config::default();
+        assert!(config.audit_claude_code_sessions());
+    }
+
+    #[test]
+    fn test_audit_claude_app_chats_default() {
+        let config = Config::default();
+        assert!(!config.audit_claude_app_chats());
+    }
+
+    #[test]
+    fn test_audit_claude_code_sessions_explicit_false() {
+        let mut config = Config::default();
+        config.set("audit-claude-code-sessions", "false");
+        assert!(!config.audit_claude_code_sessions());
+    }
+
+    #[test]
+    fn test_audit_claude_app_chats_explicit_true() {
+        let mut config = Config::default();
+        config.set("audit-claude-app-chats", "true");
+        assert!(config.audit_claude_app_chats());
     }
 }

@@ -87,6 +87,14 @@ dictionary AuditEventInfo {
     string metadata_json;
 };
 
+dictionary BridgeChatRecord {
+    string conversation_id;
+    string name;
+    string org_name;
+    string? created_at;
+    string? updated_at;
+};
+
 dictionary QueueEntryInfo {
     string id;
     string content;
@@ -265,6 +273,7 @@ interface ThaneBridge {
     sequence<AuditEventInfo> list_audit_events(BridgeAuditSeverity? min_severity);
     string export_audit_json();
     void clear_audit_log();
+    sequence<BridgeChatRecord> poll_claude_app_chats();
 
     // ── Agent queue ──
 

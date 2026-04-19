@@ -82,6 +82,9 @@ final class RustBridge {
     /// Whether the user has consented to keychain access for token limits (this session only).
     private var keychainAccessConsented = false
 
+    /// Whether SecItemCopyMatching has already failed this session (skip to avoid repeated prompts).
+    private var keychainAccessFailed = false
+
     /// Consecutive auth failures when calling the usage API (stale credentials detection).
     private var consecutiveAuthFailures = 0
 
@@ -130,7 +133,7 @@ final class RustBridge {
         // Initialize the Rust core bridge for sandbox enforcement.
         self.rustCoreBridge = try? ThaneBridge(configPath: configPath)
         logAuditEvent(workspaceId: "", eventType: "AppLaunched", severity: .info,
-                      description: "thane launched", metadata: ["version": "0.1.0-beta.19"])
+                      description: "thane launched", metadata: ["version": "0.1.0-beta.20"])
     }
 
     // MARK: - Workspace management
@@ -844,6 +847,7 @@ final class RustBridge {
         panel.orderOut(nil)
 
         keychainAccessConsented = userConsented
+        if userConsented { keychainAccessFailed = false }
         return keychainAccessConsented
     }
 
@@ -1002,6 +1006,7 @@ final class RustBridge {
 
         // Reset state so the next token panel open will re-try
         keychainAccessConsented = false
+        keychainAccessFailed = false
         cachedTokenLimits = nil
         tokenLimitsFetchedAt = nil
         consecutiveAuthFailures = 0
@@ -1224,9 +1229,11 @@ final class RustBridge {
         if status == errSecSuccess, let data = result as? Data,
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let oauth = json["claudeAiOauth"] as? [String: Any] {
+            keychainAccessFailed = false
             return oauth
         }
         NSLog("thane: SecItemCopyMatching status=\(status) (0=success, -25293=authFailed, -25308=interactionNotAllowed)")
+        keychainAccessFailed = true
         return nil
     }
 
@@ -1253,8 +1260,11 @@ final class RustBridge {
     }
 
     /// Read credentials: try Security framework, then `security` CLI, then file fallback.
+    /// Skips the Security framework if it already failed this session to avoid repeated system prompts.
     private func readClaudeOAuthCredentials() -> [String: Any]? {
-        if let oauth = readClaudeOAuthCredentialsFromKeychain() { return oauth }
+        if !keychainAccessFailed {
+            if let oauth = readClaudeOAuthCredentialsFromKeychain() { return oauth }
+        }
         if let oauth = readClaudeOAuthCredentialsFromSecurityCLI() { return oauth }
         return readClaudeOAuthCredentialsFromFile()
     }

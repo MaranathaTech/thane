@@ -840,7 +840,7 @@ final class SplitContainer: NSView {
         return browserViews[panel.id]
     }
 
-    /// Remove cached views for panels that no longer exist.
+    /// Remove cached views and per-panel state for panels that no longer exist.
     func pruneViews() {
         let currentPanelIds = Set(bridge.listPanels().map(\.id))
         for id in browserViews.keys where !currentPanelIds.contains(id) {
@@ -851,6 +851,21 @@ final class SplitContainer: NSView {
             terminalViews[id]?.terminate()
             terminalViews.removeValue(forKey: id)
             terminalWrappers.removeValue(forKey: id)
+        }
+        for id in terminalDelegates.keys where !currentPanelIds.contains(id) {
+            terminalDelegates.removeValue(forKey: id)
+        }
+        for id in contextMenuHandlers.keys where !currentPanelIds.contains(id) {
+            contextMenuHandlers.removeValue(forKey: id)
+        }
+        for id in paneContainers.keys where !currentPanelIds.contains(id) {
+            paneContainers.removeValue(forKey: id)
+        }
+        for id in lastScannedRow.keys where !currentPanelIds.contains(id) {
+            lastScannedRow.removeValue(forKey: id)
+        }
+        for id in reportedFindings.keys where !currentPanelIds.contains(id) {
+            reportedFindings.removeValue(forKey: id)
         }
     }
 }

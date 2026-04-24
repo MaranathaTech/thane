@@ -196,6 +196,12 @@ final class RustBridge {
 
         logAuditEvent(workspaceId: id, eventType: "WorkspaceClosed", severity: .warning,
                       description: "Closed workspace \"\(workspaces.first(where: { $0.id == id })?.title ?? id)\"")
+        // Clean up per-panel state before removing the tree.
+        if let tree = splitTrees[id] {
+            for panel in tree.allPanels {
+                cleanupPanel(panel.id)
+            }
+        }
         workspaces.removeAll { $0.id == id }
         splitTrees.removeValue(forKey: id)
         if activeWorkspaceId == id {
@@ -447,8 +453,16 @@ final class RustBridge {
         } else {
             return false
         }
+        cleanupPanel(panelId)
         delegate?.paneLayoutChanged(workspaceId: wsId)
         return true
+    }
+
+    /// Remove all per-panel state for a given panel ID.
+    /// Centralizes cleanup to prevent leaks from missing a map in any close path.
+    private func cleanupPanel(_ panelId: String) {
+        panelCwds.removeValue(forKey: panelId)
+        panelAgents.removeValue(forKey: panelId)
     }
 
     func selectPanel(panelId: String) -> Bool {
@@ -542,6 +556,10 @@ final class RustBridge {
             urgency: urgency, timestamp: timestamp, read: false
         )
         notifications.insert(notif, at: 0)
+        // Cap notifications to prevent unbounded memory growth in long sessions.
+        if notifications.count > 1_000 {
+            notifications = Array(notifications.prefix(1_000))
+        }
         delegate?.notificationReceived(workspaceId: workspaceId, title: title, body: body)
     }
 
@@ -1549,6 +1567,10 @@ final class RustBridge {
             guard !record.timestamp.isEmpty, record.timestamp >= launchIso else { continue }
             guard !record.uuid.isEmpty,
                   seenPromptUuids.insert(record.uuid).inserted else { continue }
+            // Cap the dedup set to prevent unbounded memory growth.
+            if seenPromptUuids.count > 10_000 {
+                seenPromptUuids.removeAll()
+            }
             logPromptRecord(record, workspaceId: workspaceId)
         }
     }

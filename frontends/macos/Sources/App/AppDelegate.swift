@@ -66,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Initialize the Rust bridge
         do {
             bridge = try RustBridge()
-            bridge.onSecurityAlert = { severity, title, message in
+            bridge.onSecurityAlert = { [weak self] severity, title, message in
                 let alert = NSAlert()
                 alert.messageText = title
                 alert.informativeText = message
@@ -74,7 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 alert.addButton(withTitle: "View Audit Log")
                 alert.addButton(withTitle: "Dismiss")
                 if alert.runModal() == .alertFirstButtonReturn {
-                    self.mainWindowController?.showRightPanel(.audit)
+                    self?.mainWindowController?.showRightPanel(.audit)
                 }
             }
             NSLog("thane: bridge initialized")

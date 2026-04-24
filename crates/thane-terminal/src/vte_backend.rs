@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use thane_core::panel::PanelId;
@@ -123,6 +123,8 @@ impl VteEngine {
             terminal,
             panel_id,
             child_pid,
+            signal_handlers: RefCell::new(Vec::new()),
+            hyperlink_gesture: RefCell::new(None),
         }
     }
 }
@@ -218,6 +220,10 @@ pub struct VteSurface {
     terminal: vte4::Terminal,
     panel_id: PanelId,
     child_pid: Rc<Cell<Option<i32>>>,
+    /// Stored signal handler IDs for disconnection on drop.
+    signal_handlers: RefCell<Vec<glib::SignalHandlerId>>,
+    /// Stored hyperlink gesture controller for removal on drop.
+    hyperlink_gesture: RefCell<Option<gtk4::GestureClick>>,
 }
 
 impl TerminalSurface for VteSurface {
@@ -340,35 +346,38 @@ impl VteSurface {
 
     /// Connect to the terminal's `child-exited` signal.
     pub fn connect_child_exited<F: Fn(i32) + 'static>(&self, f: F) {
-        self.terminal.connect_child_exited(move |_term, status| {
+        let id = self.terminal.connect_child_exited(move |_term, status| {
             f(status);
         });
+        self.signal_handlers.borrow_mut().push(id);
     }
 
     /// Connect to the terminal's `window-title-changed` signal.
     pub fn connect_title_changed<F: Fn(String) + 'static>(&self, f: F) {
-        self.terminal.connect_window_title_changed(move |term| {
+        let id = self.terminal.connect_window_title_changed(move |term| {
             let title = term
                 .window_title()
                 .map(|s| s.to_string())
                 .unwrap_or_default();
             f(title);
         });
+        self.signal_handlers.borrow_mut().push(id);
     }
 
     /// Connect to the terminal's `commit` signal for raw output interception.
     /// This receives all text committed to the terminal, including escape sequences.
     /// Callback receives the raw text data.
     pub fn connect_commit<F: Fn(&str) + 'static>(&self, f: F) {
-        self.terminal.connect_commit(move |_term, text, _size| {
+        let id = self.terminal.connect_commit(move |_term, text, _size| {
             f(text);
         });
+        self.signal_handlers.borrow_mut().push(id);
     }
 
     /// Connect to the terminal's `current-directory-uri-changed` signal.
     /// Fires when the shell reports CWD via OSC 7.
     pub fn connect_cwd_changed<F: Fn(Option<String>) + 'static>(&self, f: F) {
-        self.terminal
+        let id = self.terminal
             .connect_current_directory_uri_changed(move |term| {
                 let uri = term.current_directory_uri().map(|s| {
                     // Parse file:// URI to plain path.
@@ -382,13 +391,15 @@ impl VteSurface {
                 });
                 f(uri);
             });
+        self.signal_handlers.borrow_mut().push(id);
     }
 
     /// Connect to the terminal's `bell` signal.
     pub fn connect_bell<F: Fn() + 'static>(&self, f: F) {
-        self.terminal.connect_bell(move |_term| {
+        let id = self.terminal.connect_bell(move |_term| {
             f();
         });
+        self.signal_handlers.borrow_mut().push(id);
     }
 
     /// Connect a click handler for OSC 8 hyperlinks in the terminal.
@@ -398,8 +409,11 @@ impl VteSurface {
         let gesture = gtk4::GestureClick::new();
         gesture.set_button(1); // Left mouse button only.
 
-        let terminal = self.terminal.clone();
+        // Use a weak reference to the terminal to avoid a reference cycle:
+        // terminal -> controller -> closure -> terminal.
+        let terminal_weak = self.terminal.downgrade();
         gesture.connect_released(move |gesture, _n_press, x, y| {
+            let Some(terminal) = terminal_weak.upgrade() else { return };
             // Check if there's a hyperlink at the click position.
             if let Some(uri) = terminal.check_hyperlink_at(x, y) {
                 let uri_str = uri.as_str();
@@ -415,6 +429,25 @@ impl VteSurface {
             }
         });
 
-        self.terminal.add_controller(gesture);
+        self.terminal.add_controller(gesture.clone());
+        *self.hyperlink_gesture.borrow_mut() = Some(gesture);
+    }
+
+    /// Disconnect all signal handlers and remove gesture controllers.
+    /// Called automatically on drop, but can be called manually for early cleanup.
+    pub fn disconnect_signals(&self) {
+        let handlers = self.signal_handlers.borrow_mut().drain(..).collect::<Vec<_>>();
+        for handler_id in handlers {
+            self.terminal.disconnect(handler_id);
+        }
+        if let Some(gesture) = self.hyperlink_gesture.borrow_mut().take() {
+            self.terminal.remove_controller(&gesture);
+        }
+    }
+}
+
+impl Drop for VteSurface {
+    fn drop(&mut self) {
+        self.disconnect_signals();
     }
 }

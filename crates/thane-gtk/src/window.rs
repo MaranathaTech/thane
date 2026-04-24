@@ -715,6 +715,17 @@ impl AppState {
     }
 
     /// Close the active workspace and remove from stack.
+    /// Remove all per-panel state for a given panel ID.
+    /// Centralizes cleanup to prevent leaks from missing a map in any close path.
+    fn cleanup_panel(&mut self, panel_id: PanelId) {
+        self.terminal_panels.remove(&panel_id);
+        self.browser_panels.remove(&panel_id);
+        self.panel_workspace_map.remove(&panel_id);
+        self.block_trackers.remove(&panel_id);
+        self.last_output_times.remove(&panel_id);
+        self.panel_agents.remove(&panel_id);
+    }
+
     /// If this was the last workspace, creates a fresh one.
     /// Records the closed workspace in history.
     pub(crate) fn close_active_workspace(&mut self) {
@@ -739,10 +750,7 @@ impl AppState {
             }
             self.split_containers.remove(&ws_id);
             for pid in panel_ids {
-                self.terminal_panels.remove(&pid);
-                self.panel_workspace_map.remove(&pid);
-                self.block_trackers.remove(&pid);
-                self.last_output_times.remove(&pid);
+                self.cleanup_panel(pid);
             }
             self.zoomed_pane = None;
 
@@ -954,10 +962,7 @@ impl AppState {
 
         match ws.close_panel(pane_id, panel_id) {
             Ok(pane_closed) => {
-                self.terminal_panels.remove(&panel_id);
-                self.browser_panels.remove(&panel_id);
-                self.panel_workspace_map.remove(&panel_id);
-                self.last_output_times.remove(&panel_id);
+                self.cleanup_panel(panel_id);
 
                 if pane_closed {
                     // If it was the last pane with no more panels, close workspace.
@@ -1110,10 +1115,7 @@ impl AppState {
 
         if ws.close_pane(focused).is_ok() {
             for pid in panel_ids {
-                self.terminal_panels.remove(&pid);
-                self.browser_panels.remove(&pid);
-                self.panel_workspace_map.remove(&pid);
-                self.last_output_times.remove(&pid);
+                self.cleanup_panel(pid);
             }
             self.zoomed_pane = None;
             self.rebuild_active_splits();
@@ -1368,6 +1370,10 @@ impl AppState {
                 for prompt in prompts {
                     if prompt.uuid.is_empty() || !self.seen_prompt_uuids.insert(prompt.uuid.clone()) {
                         continue;
+                    }
+                    // Cap the dedup set to prevent unbounded memory growth.
+                    if self.seen_prompt_uuids.len() > 10_000 {
+                        self.seen_prompt_uuids.clear();
                     }
                     // Char-safe truncation for the description.
                     let short: String = prompt.text.chars().take(100).collect();
@@ -5396,5 +5402,21 @@ mod tests {
     #[test]
     fn higher_version_with_prerelease_is_newer() {
         assert!(is_version_newer("0.2.0-beta.1", "0.1.0"));
+    }
+
+    #[test]
+    fn seen_prompt_uuids_cap_prevents_unbounded_growth() {
+        let mut seen = std::collections::HashSet::new();
+        // Simulate inserting more than 10_000 unique UUIDs.
+        for i in 0..10_002 {
+            let uuid = format!("uuid-{i}");
+            seen.insert(uuid);
+            if seen.len() > 10_000 {
+                seen.clear();
+            }
+        }
+        // After exceeding the cap, the set was cleared. Subsequent
+        // inserts should have a small count.
+        assert!(seen.len() < 10_000);
     }
 }

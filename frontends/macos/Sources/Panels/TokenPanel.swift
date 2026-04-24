@@ -112,6 +112,31 @@ final class TokenPanel: NSView, ReloadablePanel {
             }
         }
 
+        // Add queue task costs (completed + running entries).
+        let queueEntries = bridge.queueList().filter { $0.status == .completed || $0.status == .running }
+        if !queueEntries.isEmpty {
+            var queueCost: Double = 0
+            var queueInput: UInt64 = 0, queueOutput: UInt64 = 0
+            var queueCacheRead: UInt64 = 0, queueCacheWrite: UInt64 = 0
+            for entry in queueEntries {
+                queueCost += entry.estimatedCostUsd
+                queueInput += entry.inputTokens
+                queueOutput += entry.outputTokens
+                queueCacheRead += entry.cacheReadTokens
+                queueCacheWrite += entry.cacheWriteTokens
+            }
+
+            let queueTooltip = costTooltip(input: queueInput, output: queueOutput, cacheRead: queueCacheRead, cacheWrite: queueCacheWrite, total: queueCost)
+            let queueRow = makeLabelRow("Agent Queue", value: formatCost(queueCost), tooltip: queueTooltip)
+            stackView.addArrangedSubview(queueRow)
+
+            costTotal += queueCost
+            totalInput += queueInput
+            totalOutput += queueOutput
+            totalCacheRead += queueCacheRead
+            totalCacheWrite += queueCacheWrite
+        }
+
         // Divider
         stackView.addArrangedSubview(makeDivider())
 

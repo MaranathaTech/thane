@@ -1024,7 +1024,6 @@ final class RustBridge {
 
         // Reset state so the next token panel open will re-try
         keychainAccessConsented = false
-        keychainAccessFailed = false
         cachedTokenLimits = nil
         tokenLimitsFetchedAt = nil
         consecutiveAuthFailures = 0
@@ -1193,12 +1192,31 @@ final class RustBridge {
     /// Refresh cost cache for all workspaces on a background queue.
     /// Called from the periodic metadata timer — never blocks the main thread.
     func refreshCostCacheAsync() {
-        let cwds = workspaces.map(\.cwd)
+        // Collect workspace root CWDs plus all per-panel CWDs, grouped by workspace CWD.
+        var cwdsByWorkspace: [String: Set<String>] = [:]
+        for ws in workspaces {
+            var cwds: Set<String> = [ws.cwd]
+            if let tree = splitTrees[ws.id] {
+                for panel in tree.allPanels {
+                    if let panelCwd = panelCwds[panel.id], !panelCwd.isEmpty {
+                        cwds.insert(panelCwd)
+                    }
+                }
+            }
+            cwdsByWorkspace[ws.cwd] = (cwdsByWorkspace[ws.cwd] ?? []).union(cwds)
+        }
         let launchDate = appLaunchDate
         DispatchQueue.global(qos: .utility).async { [weak self] in
             var results: [String: ProjectCostDTO] = [:]
-            for cwd in cwds {
-                results[cwd] = CostScanner.projectCost(cwd: cwd, since: launchDate)
+            for (wsCwd, allCwds) in cwdsByWorkspace {
+                var merged = ProjectCostDTO.zero
+                var scanned = Set<String>()
+                for cwd in allCwds {
+                    guard scanned.insert(cwd).inserted else { continue }
+                    let cost = CostScanner.projectCost(cwd: cwd, since: launchDate)
+                    merged = merged.merging(cost)
+                }
+                results[wsCwd] = merged
             }
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -1277,14 +1295,16 @@ final class RustBridge {
         return nil
     }
 
-    /// Read credentials: try Security framework, then `security` CLI, then file fallback.
-    /// Skips the Security framework if it already failed this session to avoid repeated system prompts.
+    /// Read credentials: try file first, then `security` CLI, then Security framework as last resort.
+    /// File and CLI never trigger system keychain prompts. SecItemCopyMatching is only tried
+    /// if both fail and it hasn't already failed this session.
     private func readClaudeOAuthCredentials() -> [String: Any]? {
+        if let oauth = readClaudeOAuthCredentialsFromFile() { return oauth }
+        if let oauth = readClaudeOAuthCredentialsFromSecurityCLI() { return oauth }
         if !keychainAccessFailed {
             if let oauth = readClaudeOAuthCredentialsFromKeychain() { return oauth }
         }
-        if let oauth = readClaudeOAuthCredentialsFromSecurityCLI() { return oauth }
-        return readClaudeOAuthCredentialsFromFile()
+        return nil
     }
 
     // MARK: - Agent queue
@@ -2911,6 +2931,17 @@ final class RustBridge {
 /// Mirrors the Rust `cost_tracker.rs` logic for the macOS pure-Swift path.
 enum CostScanner {
 
+    // MARK: - File cache
+
+    private struct CachedFile {
+        let mtime: Date
+        let size: UInt64
+        let entries: [UsageEntry]
+    }
+
+    private static let cacheLock = NSLock()
+    private static var fileCache: [String: CachedFile] = [:]
+
     // MARK: - Pricing
 
     private struct ModelPricing {
@@ -2963,11 +2994,21 @@ enum CostScanner {
             let jsonlFiles = files.filter { $0.hasSuffix(".jsonl") }
             sessionCount += UInt64(jsonlFiles.count)
 
+            // Prune cache entries for files that no longer exist in this directory.
+            let livePaths = Set(jsonlFiles.map { (dir as NSString).appendingPathComponent($0) })
+            cacheLock.lock()
+            for key in fileCache.keys where key.hasPrefix(dir + "/") {
+                if !livePaths.contains(key) {
+                    fileCache.removeValue(forKey: key)
+                }
+            }
+            cacheLock.unlock()
+
             for file in jsonlFiles {
                 let path = (dir as NSString).appendingPathComponent(file)
                 let entries = parseJsonlFile(path)
 
-                // File mtime for fallback timestamp check
+                // File mtime for fallback timestamp check (already read by parseJsonlFile cache)
                 let fileMtime = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
 
                 for entry in entries {
@@ -3046,7 +3087,20 @@ enum CostScanner {
     }
 
     private static func parseJsonlFile(_ path: String) -> [UsageEntry] {
-        guard let data = FileManager.default.contents(atPath: path),
+        let fm = FileManager.default
+        guard let attrs = try? fm.attributesOfItem(atPath: path),
+              let mtime = attrs[.modificationDate] as? Date,
+              let size = (attrs[.size] as? NSNumber)?.uint64Value else { return [] }
+
+        // Check cache — return cached entries if mtime and size match.
+        cacheLock.lock()
+        if let cached = fileCache[path], cached.mtime == mtime, cached.size == size {
+            cacheLock.unlock()
+            return cached.entries
+        }
+        cacheLock.unlock()
+
+        guard let data = fm.contents(atPath: path),
               let content = String(data: data, encoding: .utf8) else { return [] }
 
         var entries: [UsageEntry] = []
@@ -3059,6 +3113,12 @@ enum CostScanner {
                 entries.append(entry)
             }
         }
+
+        // Store in cache.
+        cacheLock.lock()
+        fileCache[path] = CachedFile(mtime: mtime, size: size, entries: entries)
+        cacheLock.unlock()
+
         return entries
     }
 

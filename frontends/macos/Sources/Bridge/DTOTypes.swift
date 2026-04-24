@@ -123,6 +123,28 @@ struct ProjectCostDTO: Equatable {
         planName: "Pro", displayMode: "dollar",
         fiveHourUtilization: nil, sevenDayUtilization: nil
     )
+
+    /// Merge another cost DTO into this one by summing token/cost fields.
+    /// Preserves the receiver's plan metadata and utilization values.
+    func merging(_ other: ProjectCostDTO) -> ProjectCostDTO {
+        ProjectCostDTO(
+            sessionCostUsd: sessionCostUsd + other.sessionCostUsd,
+            sessionInputTokens: sessionInputTokens + other.sessionInputTokens,
+            sessionOutputTokens: sessionOutputTokens + other.sessionOutputTokens,
+            sessionCacheReadTokens: sessionCacheReadTokens + other.sessionCacheReadTokens,
+            sessionCacheWriteTokens: sessionCacheWriteTokens + other.sessionCacheWriteTokens,
+            alltimeCostUsd: alltimeCostUsd + other.alltimeCostUsd,
+            alltimeInputTokens: alltimeInputTokens + other.alltimeInputTokens,
+            alltimeOutputTokens: alltimeOutputTokens + other.alltimeOutputTokens,
+            alltimeCacheReadTokens: alltimeCacheReadTokens + other.alltimeCacheReadTokens,
+            alltimeCacheWriteTokens: alltimeCacheWriteTokens + other.alltimeCacheWriteTokens,
+            sessionCount: sessionCount + other.sessionCount,
+            planName: planName,
+            displayMode: displayMode,
+            fiveHourUtilization: fiveHourUtilization,
+            sevenDayUtilization: sevenDayUtilization
+        )
+    }
 }
 
 enum SplitOrientationDTO {

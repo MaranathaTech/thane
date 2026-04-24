@@ -133,7 +133,7 @@ final class RustBridge {
         // Initialize the Rust core bridge for sandbox enforcement.
         self.rustCoreBridge = try? ThaneBridge(configPath: configPath)
         logAuditEvent(workspaceId: "", eventType: "AppLaunched", severity: .info,
-                      description: "thane launched", metadata: ["version": "0.1.0-beta.20"])
+                      description: "thane launched", metadata: ["version": "0.1.0-beta.21"])
     }
 
     // MARK: - Workspace management

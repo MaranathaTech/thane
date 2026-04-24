@@ -841,9 +841,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var claudeInstalled: Bool = false
 
     private func runStartupChecks() {
-        installCLITools()
+        checkAndPromptCliInstall()
         checkClaudeInstalled()
     }
+
+    /// UserDefaults key set when the user clicks "Don't Ask Again" in the CLI install prompt.
+    private static let skipCliPromptKey = "thane.cli.skipInstallPrompt"
 
     // MARK: - Update Check
 
@@ -938,54 +941,107 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
-    /// Symlink bundled CLI tools to /usr/local/bin so they're available in terminals.
-    private func installCLITools() {
-        let fm = FileManager.default
-        let bundleBin = Bundle.main.bundlePath + "/Contents/MacOS"
-        let installDir = "/usr/local/bin"
-
-        // Ensure /usr/local/bin exists
-        if !fm.fileExists(atPath: installDir) {
-            NSLog("thane: /usr/local/bin does not exist, skipping CLI install")
+    /// On launch, verify thane-cli is reachable on PATH and prompt the user to
+    /// install a symlink if it isn't. Skipped when running from a non-stable
+    /// bundle location (dev builds) or when the user has opted out.
+    private func checkAndPromptCliInstall() {
+        let bundlePath = Bundle.main.bundlePath
+        guard CliInstallChecker.isStableBundleLocation(bundlePath: bundlePath) else {
+            NSLog("thane: skipping CLI install check — bundle not in /Applications")
             return
         }
 
-        for tool in ["thane-cli"] {
-            let src = "\(bundleBin)/\(tool)"
-            let dst = "\(installDir)/\(tool)"
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser.path
+        let status = CliInstallChecker.check(
+            bundlePath: bundlePath,
+            candidates: CliInstallChecker.defaultCandidates(home: home),
+            fileExists: { fm.fileExists(atPath: $0) },
+            resolveSymlink: { try? fm.destinationOfSymbolicLink(atPath: $0) }
+        )
 
-            guard fm.fileExists(atPath: src) else {
-                NSLog("thane: \(tool) not found in app bundle, skipping")
-                continue
-            }
-
-            // Check if symlink already points to the right place
-            if let existing = try? fm.destinationOfSymbolicLink(atPath: dst), existing == src {
-                NSLog("thane: \(tool) symlink already up to date")
-                continue
-            }
-
-            // Remove stale symlink or file
-            try? fm.removeItem(atPath: dst)
-
-            do {
-                try fm.createSymbolicLink(atPath: dst, withDestinationPath: src)
-                NSLog("thane: symlinked \(dst) → \(src)")
-            } catch {
-                // May fail without admin privileges — try via osascript
-                NSLog("thane: symlink failed (\(error)), trying with admin privileges...")
-                let script = "do shell script \"ln -sf '\(src)' '\(dst)'\" with administrator privileges"
-                if let appleScript = NSAppleScript(source: script) {
-                    var errorDict: NSDictionary?
-                    appleScript.executeAndReturnError(&errorDict)
-                    if let err = errorDict {
-                        NSLog("thane: admin symlink failed: \(err)")
-                    } else {
-                        NSLog("thane: symlinked \(dst) → \(src) (with admin)")
-                    }
-                }
-            }
+        switch status {
+        case .installed(let path):
+            NSLog("thane: thane-cli already on PATH at \(path)")
+        case .stale(let foundAt, let pointsAt):
+            NSLog("thane: stale thane-cli at \(foundAt) points at \(pointsAt), will prompt to reinstall")
+            promptCliInstall(isReinstall: true)
+        case .notInstalled:
+            promptCliInstall(isReinstall: false)
         }
+    }
+
+    /// Show the install prompt unless the user has permanently dismissed it.
+    private func promptCliInstall(isReinstall: Bool) {
+        if UserDefaults.standard.bool(forKey: Self.skipCliPromptKey) {
+            NSLog("thane: CLI install prompt skipped (user opted out)")
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = isReinstall ? "Update thane-cli?" : "Install thane-cli?"
+        alert.informativeText = isReinstall
+            ? "A thane-cli symlink on your PATH points to an older install. Update it to point at this app?"
+            : "The thane-cli command-line tool lets you control thane from any terminal (e.g., submit queue tasks, list workspaces).\n\nInstall a symlink at /usr/local/bin/thane-cli?"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Install")
+        alert.addButton(withTitle: "Not Now")
+        alert.addButton(withTitle: "Don't Ask Again")
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            installCliSymlink()
+        case .alertThirdButtonReturn:
+            UserDefaults.standard.set(true, forKey: Self.skipCliPromptKey)
+            NSLog("thane: user opted out of CLI install prompt")
+        default:
+            break
+        }
+    }
+
+    /// Create /usr/local/bin/thane-cli pointing at this bundle's thane-cli,
+    /// prompting for admin credentials via osascript.
+    private func installCliSymlink() {
+        let src = CliInstallChecker.expectedSource(bundlePath: Bundle.main.bundlePath)
+        let dst = "/usr/local/bin/thane-cli"
+
+        guard FileManager.default.fileExists(atPath: src) else {
+            NSLog("thane: thane-cli not found in app bundle at \(src)")
+            showSetupAlert(title: "Install failed",
+                           message: "thane-cli is not bundled with this app.")
+            return
+        }
+
+        let script = "do shell script \"mkdir -p /usr/local/bin && ln -sf '\(src)' '\(dst)'\" with administrator privileges"
+        guard let appleScript = NSAppleScript(source: script) else {
+            NSLog("thane: failed to build AppleScript for install")
+            return
+        }
+
+        var errorDict: NSDictionary?
+        appleScript.executeAndReturnError(&errorDict)
+        if let err = errorDict {
+            // User cancel is code -128; don't show a scary error for that.
+            let code = (err[NSAppleScript.errorNumber] as? Int) ?? 0
+            if code == -128 {
+                NSLog("thane: user cancelled CLI install admin prompt")
+                return
+            }
+            NSLog("thane: CLI install failed: \(err)")
+            showSetupAlert(
+                title: "Install failed",
+                message: "Could not install thane-cli.\n\nYou can run this manually in Terminal:\n  sudo ln -sf \(src) \(dst)"
+            )
+            return
+        }
+
+        NSLog("thane: thane-cli installed at \(dst)")
+        let alert = NSAlert()
+        alert.messageText = "thane-cli installed"
+        alert.informativeText = "Run `thane-cli --help` in any terminal to get started."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private func checkCommand(_ command: String, args: [String]) -> Bool {

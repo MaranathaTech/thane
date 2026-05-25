@@ -50,7 +50,24 @@ fi
 info "Installing binaries to /usr/local/bin..."
 sudo install -m 755 "$SCRIPT_DIR/thane" /usr/local/bin/thane
 sudo install -m 755 "$SCRIPT_DIR/thane-cli" /usr/local/bin/thane-cli
-ok "Installed thane and thane-cli to /usr/local/bin"
+sudo install -m 755 "$SCRIPT_DIR/thane-daemon" /usr/local/bin/thane-daemon
+ok "Installed thane, thane-cli, and thane-daemon to /usr/local/bin"
+
+# ── Install systemd user unit so the daemon runs at login ────────────────
+if [ -f "$SCRIPT_DIR/systemd/thane-daemon.service" ] && command -v systemctl &>/dev/null; then
+    UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    mkdir -p "$UNIT_DIR"
+    # The packaged unit points at /usr/bin/thane-daemon; rewrite to /usr/local/bin
+    # since that's where install.sh placed the binary.
+    sed 's|ExecStart=/usr/bin/thane-daemon|ExecStart=/usr/local/bin/thane-daemon|' \
+        "$SCRIPT_DIR/systemd/thane-daemon.service" > "$UNIT_DIR/thane-daemon.service"
+    systemctl --user daemon-reload || true
+    if systemctl --user enable --now thane-daemon.service 2>/dev/null; then
+        ok "thane-daemon enabled (will auto-start at login)"
+    else
+        info "Skipped enabling thane-daemon.service (run \`systemctl --user enable --now thane-daemon\` manually)"
+    fi
+fi
 
 # ── Install desktop entry ────────────────────────────────────────────────
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"

@@ -1612,6 +1612,41 @@ impl AppState {
     /// Refresh the audit panel with current events.
     fn refresh_audit_panel(&self) {
         self.audit_panel.set_events(self.audit_log.all());
+        self.refresh_audit_sink_pills();
+    }
+
+    /// Phase 5: emit a synthetic Info audit event so the operator can verify
+    /// external delivery without waiting for real activity. The configured
+    /// sinks pick it up via the AuditLog forwarder.
+    fn fire_audit_sink_test_event(&mut self, sink_name: &'static str) {
+        let ws_id = self
+            .workspace_mgr
+            .active()
+            .map(|ws| ws.id)
+            .unwrap_or(uuid::Uuid::nil());
+        self.audit_log.log(
+            ws_id,
+            None,
+            AuditEventType::Custom("AuditSinkTest".to_string()),
+            AuditSeverity::Info,
+            format!("Synthetic test event for sink '{sink_name}'"),
+            serde_json::json!({ "sink": sink_name }),
+        );
+    }
+
+    /// Phase 5: refresh the audit panel's per-sink status pills from the
+    /// process-local dispatcher.
+    fn refresh_audit_sink_pills(&self) {
+        let Some(dispatcher) = crate::audit_sink_runtime::dispatcher(&self.config) else {
+            return;
+        };
+        let report = dispatcher.status_snapshot_blocking();
+        let Ok(json_report) = serde_json::to_value(&report) else { return };
+        let window = match self.window_ref.as_ref().and_then(|w| w.upgrade()) {
+            Some(w) => w.upcast::<gtk4::Window>(),
+            None => return,
+        };
+        self.audit_panel.set_sink_status(&json_report, window);
     }
 
     fn toggle_git_diff_panel(&mut self) {
@@ -2064,6 +2099,8 @@ impl AppState {
                 );
                 let ws_id = entry.workspace_id.unwrap_or(Uuid::nil());
                 let entry_id = entry.id;
+                let audit_prompts = self.config.audit_queue_prompts();
+                let prompt_for_audit = entry.content.clone();
                 self.audit_log_mut().log(
                     ws_id,
                     None,
@@ -2075,6 +2112,15 @@ impl AppState {
                         "cwd": cwd,
                         "log_path": log_path.to_string_lossy(),
                     }),
+                );
+                // Symmetry with interactive Claude Code sessions: capture the prompt
+                // text immediately after QueueTaskStarted, gated by config.
+                queue_executor::record_queue_prompt_event(
+                    self.audit_log_mut(),
+                    ws_id,
+                    entry_id,
+                    &prompt_for_audit,
+                    audit_prompts,
                 );
                 self.running_queue_entry = Some((entry.id, child));
                 Some(entry_id)
@@ -2112,6 +2158,18 @@ impl AppState {
         let ws_id = self.agent_queue.get(entry_id)
             .and_then(|e| e.workspace_id)
             .unwrap_or(Uuid::nil());
+
+        // If the user cancelled this entry while it was running, terminate the subprocess.
+        let cancelled = self.agent_queue.get(entry_id)
+            .map(|e| e.status == thane_core::agent_queue::QueueEntryStatus::Cancelled)
+            .unwrap_or(false);
+        if cancelled {
+            tracing::info!("Killing cancelled queue subprocess for {}", entry_id);
+            let _ = child.kill();
+            let _ = child.wait();
+            self.running_queue_entry = None;
+            return (true, None);
+        }
 
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -2350,6 +2408,58 @@ pub(crate) fn styled_dialog(
 
 /// Take a screenshot of a GTK widget and save to /tmp.
 /// Returns the file path on success, or None on failure.
+/// Build an `AuditLog` with HMAC signing turned on when policy + key allow it.
+///
+/// Mirrors the wiring in `thane_bridge::ThaneBridge::new`. Pulled out so the
+/// GTK app picks up exactly the same key the macOS frontend uses (per-user
+/// platform secret store).
+///
+/// `policy_load_err` carries any deferred error from `policy::load_for_platform`
+/// observed in the AppWindow constructor; if present, an Alert-severity audit
+/// event is emitted so the failure shows up in SIEM rather than only stderr.
+fn build_signed_audit_log(
+    config: &thane_core::config::Config,
+    max_events: usize,
+    policy_load_err: Option<String>,
+) -> AuditLog {
+    let mut log = AuditLog::new(max_events)
+        .with_redaction_policy(config.audit_redaction_policy());
+    if config.audit_signing_enabled() {
+        let store = thane_platform::default_secret_store();
+        match thane_core::audit_keys::try_audit_hmac_key(store.as_ref()) {
+            Ok(key) => log.set_signing_key(key),
+            Err(e) => tracing::warn!(
+                "audit-signing-enabled=true but HMAC key unavailable; events will be unsigned: {e}"
+            ),
+        }
+    } else {
+        tracing::warn!(
+            "audit-signing-enabled = false; events will not be cryptographically signed"
+        );
+    }
+    // Phase 5: lazily-spawn the external-sink dispatcher (if any sink is
+    // enabled) and attach its handle as the AuditLog's forwarder. The
+    // dispatcher is shared with the RPC handler via `crate::audit_sink_runtime`.
+    if let Some(dispatcher) = crate::audit_sink_runtime::dispatcher(config) {
+        use std::sync::Arc;
+        log.set_forwarder(Arc::new(dispatcher.handle()));
+    }
+    // Phase 6b: surface any enterprise-policy load failure now that the log
+    // exists. The event is forwarded through the sink chain if one is up.
+    if let Some(err) = policy_load_err {
+        use thane_core::audit::{AuditEventType, AuditSeverity};
+        log.log(
+            uuid::Uuid::nil(),
+            None,
+            AuditEventType::Custom("enterprise_policy_load_failed".to_string()),
+            AuditSeverity::Alert,
+            "Failed to load enterprise policy; falling back to user config",
+            serde_json::json!({ "error": err }),
+        );
+    }
+    log
+}
+
 fn screenshot_widget(widget: &gtk4::Widget) -> Option<String> {
     use gdk4::prelude::{PaintableExt, TextureExt};
 
@@ -3263,7 +3373,28 @@ fn wire_terminal_notifications(
 
 impl AppWindow {
     pub fn new(app: &gtk4::Application) -> Self {
-        let config = Config::load_default();
+        let mut config = Config::load_default();
+
+        // Phase 6b: stack any deployed enterprise policy on top of the user
+        // config. Failure here is non-fatal — log it and continue with user
+        // config only. The audit log isn't built yet so we can't emit an
+        // event here; build_signed_audit_log will see the failure flag below.
+        let policy_load_err = match thane_core::policy::load_for_platform() {
+            Ok(Some(policy)) => {
+                tracing::info!(
+                    "enterprise policy active (issued by {:?}, {} locked keys)",
+                    policy.issued_by,
+                    policy.locked_keys.len()
+                );
+                config.apply_policy(std::sync::Arc::new(policy));
+                None
+            }
+            Ok(None) => None,
+            Err(e) => {
+                tracing::error!("enterprise policy load failed: {e}; continuing with user config");
+                Some(e.to_string())
+            }
+        };
 
         // Create the VTE engine with config.
         let mut engine = VteEngine::new();
@@ -3338,6 +3469,34 @@ impl AppWindow {
         // Audit panel (right side, hidden by default).
         let audit_panel = AuditPanel::new();
         audit_panel.widget().set_visible(false);
+        audit_panel.set_clear_visible(config.audit_allow_clear());
+        audit_panel.set_retention_days(config.audit_retention_days());
+        audit_panel.set_encryption_indicator(
+            config.audit_encryption_enabled(),
+            thane_platform::default_secret_store_backend_name(),
+        );
+        // Phase 6b: enterprise-policy banner. Visible whenever a policy is
+        // active; falls back to a rendered banner if the policy didn't ship
+        // an explicit `ui_banner` string.
+        if let Some(policy) = config.policy() {
+            let banner = policy.ui_banner.clone().unwrap_or_else(|| {
+                let tenant = policy
+                    .lookup("audit-sink-loki-tenant")
+                    .unwrap_or("<tenant>");
+                format!(
+                    "Logs shipping to {issuer}'s Grafana via Loki (tenant: {tenant}). \
+                     Redaction: {redaction}. Retention: {days} days.",
+                    issuer = if policy.issued_by.is_empty() {
+                        "your organization"
+                    } else {
+                        policy.issued_by.as_str()
+                    },
+                    redaction = config.audit_redaction_policy_str(),
+                    days = config.audit_retention_days(),
+                )
+            });
+            audit_panel.set_enterprise_policy_banner(&banner);
+        }
         main_box.append(audit_panel.widget());
 
         // Git diff panel (right side, hidden by default).
@@ -3359,8 +3518,33 @@ impl AppWindow {
         settings_panel.set_link_url_in_browser(config.link_url_in_browser());
         settings_panel.set_font_color(config.terminal_font_color());
         settings_panel.set_sensitive_policy(config.sensitive_data_policy());
+        settings_panel.set_audit_redaction_policy(config.audit_redaction_policy_str());
         settings_panel.set_audit_code_sessions(config.audit_claude_code_sessions());
         settings_panel.set_audit_app_chats(config.audit_claude_app_chats());
+        // Phase 5: audit sink defaults loaded from config.
+        settings_panel.set_audit_sink_syslog_enabled(config.audit_sink_syslog_enabled());
+        settings_panel.set_audit_sink_syslog_host(
+            &format!("{}:{}",
+                config.audit_sink_syslog_host().unwrap_or(""),
+                config.audit_sink_syslog_port(),
+            )
+            .trim_start_matches(':')
+            .to_string(),
+        );
+        settings_panel.set_audit_sink_syslog_min_severity(config.audit_sink_syslog_min_severity());
+        settings_panel.set_audit_sink_webhook_enabled(config.audit_sink_webhook_enabled());
+        settings_panel.set_audit_sink_webhook_url(config.audit_sink_webhook_url().unwrap_or(""));
+        settings_panel.set_audit_sink_webhook_min_severity(config.audit_sink_webhook_min_severity());
+        // Phase 6: enterprise sink defaults loaded from config.
+        settings_panel.set_audit_sink_s3_enabled(config.audit_sink_s3_enabled());
+        settings_panel.set_audit_sink_s3_bucket(config.audit_sink_s3_bucket().unwrap_or(""));
+        settings_panel.set_audit_sink_s3_min_severity(config.audit_sink_s3_min_severity());
+        settings_panel.set_audit_sink_splunk_enabled(config.audit_sink_splunk_enabled());
+        settings_panel.set_audit_sink_splunk_url(config.audit_sink_splunk_url().unwrap_or(""));
+        settings_panel.set_audit_sink_splunk_min_severity(config.audit_sink_splunk_min_severity());
+        settings_panel.set_audit_sink_datadog_enabled(config.audit_sink_datadog_enabled());
+        settings_panel.set_audit_sink_datadog_region(config.audit_sink_datadog_region());
+        settings_panel.set_audit_sink_datadog_min_severity(config.audit_sink_datadog_min_severity());
         settings_panel.set_queue_mode(config.queue_mode());
         settings_panel.set_queue_schedule(config.queue_schedule());
         settings_panel.set_queue_sandbox_mode(config.queue_sandbox_mode());
@@ -3369,6 +3553,9 @@ impl AppWindow {
         // Enterprise cost row is only visible for Enterprise plans (detected later).
         settings_panel.set_enterprise_cost_visible(false);
         // Working directory is set to a static location, not user-configurable.
+        // Phase 6b: render lock indicators + policy banner for any active
+        // enterprise policy. No-op when unmanaged.
+        settings_panel.apply_enterprise_locks(&config);
         main_box.append(settings_panel.widget());
 
         // Token usage panel (right side, hidden by default).
@@ -3453,7 +3640,7 @@ impl AppWindow {
             config_mtime: None,
             agent_queue: AgentQueue::new(),
             running_queue_entry: None,
-            audit_log: AuditLog::new(10000),
+            audit_log: build_signed_audit_log(&config, 10000, policy_load_err),
             self_ref: None,
             window_ref: None,
             current_ui_font_size: config.ui_text_size(),
@@ -3674,13 +3861,76 @@ impl AppWindow {
             });
         }
 
-        // Wire audit panel: clear button.
+        // Wire audit panel: clear button. Prompts for a non-empty reason before
+        // attempting `clear_admin`; the underlying call still re-checks policy.
         {
             let state_ref = state.clone();
+            let window_ref = window.downgrade();
             state.borrow().audit_panel.connect_clear(move || {
-                let mut s = state_ref.borrow_mut();
-                s.audit_log.clear();
-                s.refresh_audit_panel();
+                let Some(win) = window_ref.upgrade() else { return };
+                let (dialog, vbox) = styled_dialog(&win, "Clear Audit Log", 420, 160);
+
+                let prompt = gtk4::Label::new(Some(
+                    "Clearing the audit log records a Critical event. \
+                    Enter a reason for the audit trail:",
+                ));
+                prompt.set_wrap(true);
+                prompt.set_halign(gtk4::Align::Start);
+                vbox.append(&prompt);
+
+                let entry = gtk4::Entry::new();
+                entry.set_placeholder_text(Some("Reason (required)"));
+                vbox.append(&entry);
+
+                let btn_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+                btn_box.set_halign(gtk4::Align::End);
+                let cancel_btn = gtk4::Button::with_label("Cancel");
+                let clear_btn = gtk4::Button::with_label("Clear");
+                clear_btn.add_css_class("destructive-action");
+                btn_box.append(&cancel_btn);
+                btn_box.append(&clear_btn);
+                vbox.append(&btn_box);
+
+                {
+                    let dlg = dialog.clone();
+                    cancel_btn.connect_clicked(move |_| dlg.close());
+                }
+
+                let do_clear: std::rc::Rc<dyn Fn()> = {
+                    let state_ref = state_ref.clone();
+                    let entry_ref = entry.clone();
+                    let dlg = dialog.clone();
+                    std::rc::Rc::new(move || {
+                        let reason = entry_ref.text().to_string();
+                        if reason.trim().is_empty() {
+                            entry_ref.add_css_class("error");
+                            return;
+                        }
+                        let mut s = state_ref.borrow_mut();
+                        let allow = s.config.audit_allow_clear();
+                        match s.audit_log.clear_admin(reason, allow) {
+                            Ok(()) => {
+                                s.refresh_audit_panel();
+                                dlg.close();
+                            }
+                            Err(e) => {
+                                tracing::warn!("Audit clear rejected: {e}");
+                                dlg.close();
+                            }
+                        }
+                    })
+                };
+
+                {
+                    let do_clear = do_clear.clone();
+                    clear_btn.connect_clicked(move |_| do_clear());
+                }
+                {
+                    let do_clear = do_clear.clone();
+                    entry.connect_activate(move |_| do_clear());
+                }
+
+                dialog.present();
             });
         }
 
@@ -3710,6 +3960,53 @@ impl AppWindow {
                         }
                     });
                 }
+            });
+        }
+
+        // Wire audit panel: Verify Integrity button.
+        {
+            let state_ref = state.clone();
+            let window_ref = window.downgrade();
+            state.borrow().audit_panel.connect_verify(move || {
+                let result = {
+                    let s = state_ref.borrow();
+                    s.audit_log.verify_integrity()
+                };
+                let Some(win) = window_ref.upgrade() else { return };
+                let (heading, body) = if result.verified {
+                    (
+                        format!("Audit log verified ({} events)", result.events_checked),
+                        "Signatures valid and hash chain intact.".to_string(),
+                    )
+                } else if let Some(f) = result.first_failure {
+                    let kind = match f.kind {
+                        thane_core::audit::VerifyFailureKind::HmacMismatch => "HMAC mismatch",
+                        thane_core::audit::VerifyFailureKind::ChainBreak => "Chain break",
+                        thane_core::audit::VerifyFailureKind::MissingHmac => "Missing HMAC",
+                        thane_core::audit::VerifyFailureKind::UnparseableEvent => {
+                            "Unparseable event"
+                        }
+                    };
+                    (
+                        "Audit log integrity FAILED".to_string(),
+                        format!(
+                            "First failure at event #{} (id {}): {kind}.\n\
+                             Examined {} events before failure.",
+                            f.event_index, f.event_id, result.events_checked
+                        ),
+                    )
+                } else {
+                    (
+                        "Audit log integrity FAILED".to_string(),
+                        "Verification returned no failure detail.".to_string(),
+                    )
+                };
+                let dialog = gtk4::AlertDialog::builder()
+                    .modal(true)
+                    .message(heading)
+                    .detail(body)
+                    .build();
+                dialog.show(Some(&win));
             });
         }
 
@@ -3986,6 +4283,28 @@ impl AppWindow {
                 });
         }
 
+        // Wire settings panel: audit redaction policy.
+        {
+            let state_ref = state.clone();
+            state
+                .borrow()
+                .settings_panel
+                .connect_audit_redaction_policy_changed(move |idx| {
+                    let name = match idx {
+                        0 => "none",
+                        2 => "strict",
+                        _ => "redact",
+                    };
+                    let mut s = state_ref.borrow_mut();
+                    s.config.set("audit-redaction-policy", name);
+                    // Re-apply policy to the running audit log so the change
+                    // takes effect immediately, without a restart.
+                    let policy = thane_core::audit_redaction::RedactionPolicy::from_config_value(name);
+                    s.audit_log.set_redaction_policy(policy);
+                    s.save_config();
+                });
+        }
+
         // Wire settings panel: audit Claude Code sessions.
         {
             let state_ref = state.clone();
@@ -4010,6 +4329,172 @@ impl AppWindow {
                     s.config.set("audit-claude-app-chats", &format!("{enabled}"));
                     s.save_config();
                 });
+        }
+
+        // ── Phase 5: wire audit-sink settings ─────────────────────────────
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_syslog_enabled(move |on| {
+                let mut s = state_ref.borrow_mut();
+                s.config.set("audit-sink-syslog-enabled", &format!("{on}"));
+                s.save_config();
+            });
+        }
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_syslog_host(move |raw| {
+                let mut s = state_ref.borrow_mut();
+                // Split "host:port" — leave port alone if just a host.
+                if let Some((host, port)) = raw.rsplit_once(':')
+                    && port.parse::<u16>().is_ok()
+                {
+                    s.config.set("audit-sink-syslog-host", host);
+                    s.config.set("audit-sink-syslog-port", port);
+                } else {
+                    s.config.set("audit-sink-syslog-host", raw);
+                }
+                s.save_config();
+            });
+        }
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_syslog_severity(move |sev| {
+                let mut s = state_ref.borrow_mut();
+                s.config.set("audit-sink-syslog-min-severity", sev);
+                s.save_config();
+            });
+        }
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_syslog_test(move || {
+                state_ref.borrow_mut().fire_audit_sink_test_event("syslog");
+            });
+        }
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_webhook_enabled(move |on| {
+                let mut s = state_ref.borrow_mut();
+                s.config.set("audit-sink-webhook-enabled", &format!("{on}"));
+                s.save_config();
+            });
+        }
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_webhook_url(move |url| {
+                let mut s = state_ref.borrow_mut();
+                s.config.set("audit-sink-webhook-url", url);
+                s.save_config();
+            });
+        }
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_webhook_severity(move |sev| {
+                let mut s = state_ref.borrow_mut();
+                s.config.set("audit-sink-webhook-min-severity", sev);
+                s.save_config();
+            });
+        }
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_webhook_test(move || {
+                state_ref.borrow_mut().fire_audit_sink_test_event("webhook");
+            });
+        }
+
+        // Phase 6: S3.
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_s3_enabled(move |on| {
+                let mut s = state_ref.borrow_mut();
+                s.config.set("audit-sink-s3-enabled", &format!("{on}"));
+                s.save_config();
+            });
+        }
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_s3_bucket(move |bucket| {
+                let mut s = state_ref.borrow_mut();
+                s.config.set("audit-sink-s3-bucket", bucket);
+                s.save_config();
+            });
+        }
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_s3_severity(move |sev| {
+                let mut s = state_ref.borrow_mut();
+                s.config.set("audit-sink-s3-min-severity", sev);
+                s.save_config();
+            });
+        }
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_s3_test(move || {
+                state_ref.borrow_mut().fire_audit_sink_test_event("s3");
+            });
+        }
+
+        // Phase 6: Splunk HEC.
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_splunk_enabled(move |on| {
+                let mut s = state_ref.borrow_mut();
+                s.config.set("audit-sink-splunk-enabled", &format!("{on}"));
+                s.save_config();
+            });
+        }
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_splunk_url(move |url| {
+                let mut s = state_ref.borrow_mut();
+                s.config.set("audit-sink-splunk-url", url);
+                s.save_config();
+            });
+        }
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_splunk_severity(move |sev| {
+                let mut s = state_ref.borrow_mut();
+                s.config.set("audit-sink-splunk-min-severity", sev);
+                s.save_config();
+            });
+        }
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_splunk_test(move || {
+                state_ref.borrow_mut().fire_audit_sink_test_event("splunk");
+            });
+        }
+
+        // Phase 6: Datadog.
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_datadog_enabled(move |on| {
+                let mut s = state_ref.borrow_mut();
+                s.config.set("audit-sink-datadog-enabled", &format!("{on}"));
+                s.save_config();
+            });
+        }
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_datadog_region(move |region| {
+                let mut s = state_ref.borrow_mut();
+                s.config.set("audit-sink-datadog-region", region);
+                s.save_config();
+            });
+        }
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_datadog_severity(move |sev| {
+                let mut s = state_ref.borrow_mut();
+                s.config.set("audit-sink-datadog-min-severity", sev);
+                s.save_config();
+            });
+        }
+        {
+            let state_ref = state.clone();
+            state.borrow().settings_panel.connect_audit_sink_datadog_test(move || {
+                state_ref.borrow_mut().fire_audit_sink_test_event("datadog");
+            });
         }
 
         // Wire settings panel: plan selection.
@@ -5001,12 +5486,59 @@ impl AppWindow {
             let state_ref = state.clone();
             let audit_dir = thane_platform::dirs::LinuxDirs.data_dir().join("audit");
             let flushed_count = std::cell::Cell::new(0usize);
+
+            // Resolve the AES rotation key once at startup if encryption is
+            // enabled, then run a one-shot migration of any plaintext rotated
+            // files left behind from before the feature shipped.
+            let encryption_key: Option<[u8; 32]> = if config.audit_encryption_enabled() {
+                let secret_store = thane_platform::default_secret_store();
+                match thane_core::audit_keys::try_audit_aes_key(secret_store.as_ref()) {
+                    Ok(k) => Some(k),
+                    Err(e) => {
+                        tracing::warn!(
+                            "audit-encryption-enabled=true but AES key unavailable; rotated audit files will stay plaintext: {e}"
+                        );
+                        None
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "audit-encryption-enabled=false — rotated audit files will be written in plaintext"
+                );
+                None
+            };
+
+            if encryption_key.is_some() {
+                let migration_store = AuditStore::new(audit_dir.clone())
+                    .with_encryption_key(encryption_key);
+                match migration_store.migrate_plaintext_rotated_files() {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        tracing::info!("audit migration: encrypted {n} plaintext rotated file(s)");
+                        let mut s = state.borrow_mut();
+                        s.audit_log.log(
+                            uuid::Uuid::nil(),
+                            None,
+                            thane_core::audit::AuditEventType::Custom(
+                                "audit_migration_encrypted".to_string(),
+                            ),
+                            thane_core::audit::AuditSeverity::Info,
+                            format!("Encrypted {n} pre-existing plaintext audit file(s) at rest"),
+                            serde_json::json!({ "files_converted": n }),
+                        );
+                    }
+                    Err(e) => tracing::warn!("audit migration failed: {e}"),
+                }
+            }
+
             glib::timeout_add_seconds_local(10, move || {
                 let s = state_ref.borrow();
                 let all_events = s.audit_log.all();
                 let already_flushed = flushed_count.get();
                 if all_events.len() > already_flushed {
-                    let store = AuditStore::new(audit_dir.clone());
+                    let store = AuditStore::new(audit_dir.clone())
+                        .with_retention_days(s.config.audit_retention_days())
+                        .with_encryption_key(encryption_key);
                     for event in &all_events[already_flushed..] {
                         if let Err(e) = store.append(event) {
                             tracing::error!("Audit flush failed: {e}");
@@ -5014,6 +5546,9 @@ impl AppWindow {
                         }
                     }
                     flushed_count.set(all_events.len());
+                    if let Err(e) = store.purge_expired(chrono::Utc::now()) {
+                        tracing::warn!("Audit purge failed: {e}");
+                    }
                 }
                 glib::ControlFlow::Continue
             });

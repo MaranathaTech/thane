@@ -361,6 +361,25 @@ const DEFAULT_CSS: &str = r#"
     background-color: alpha(#f87171, 0.18);
 }
 
+/* Phase 5: external-sink status pills shown at the top of the audit panel. */
+.audit-sink-pill {
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 8px;
+}
+.audit-sink-pill-healthy {
+    color: #34d399;
+    background-color: alpha(#34d399, 0.15);
+}
+.audit-sink-pill-degraded {
+    color: #fbbf24;
+    background-color: alpha(#fbbf24, 0.18);
+}
+.audit-sink-pill-failing {
+    color: #f87171;
+    background-color: alpha(#f87171, 0.18);
+}
+
 .audit-event-type {
     font-size: 14px;
     font-weight: 600;

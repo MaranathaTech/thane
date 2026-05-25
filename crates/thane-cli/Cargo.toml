@@ -13,6 +13,8 @@ path = "src/main.rs"
 thane-rpc.workspace = true
 thane-core.workspace = true
 thane-ipc.workspace = true
+thane-persist.workspace = true
+thane-platform.workspace = true
 clap.workspace = true
 tokio.workspace = true
 serde.workspace = true
@@ -24,3 +26,13 @@ tracing-subscriber.workspace = true
 base64.workspace = true
 dirs.workspace = true
 nix.workspace = true
+libc.workspace = true
+hex.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+# Enterprise enrollment HTTP client (synchronous, no tokio reactor needed).
+ureq = { workspace = true }
+whoami = "1"
+
+[dev-dependencies]
+tempfile = "3"

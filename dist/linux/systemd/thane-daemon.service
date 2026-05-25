@@ -1,0 +1,13 @@
+[Unit]
+Description=thane terminal workspace manager daemon
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/thane-daemon
+Restart=on-failure
+RestartSec=2s
+Environment=PATH=/usr/local/bin:%h/.local/bin:%h/.cargo/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

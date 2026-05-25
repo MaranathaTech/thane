@@ -15,6 +15,7 @@ use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::agent_queue::{AgentQueue, QueueTokenUsage};
+use crate::audit::{AuditEventType, AuditLog, AuditSeverity};
 use crate::sandbox::SandboxPolicy;
 
 /// Token limit error patterns to detect in Claude Code output.
@@ -394,6 +395,59 @@ pub fn process_queue_output(
     }
 }
 
+/// Record a `UserPrompt` audit event for a headless queue task.
+///
+/// Must be called immediately after `QueueTaskStarted` so the operator has
+/// symmetric coverage with the interactive Claude Code path. Gated by
+/// `audit-queue-prompts` (the caller passes its current value as `enabled`).
+///
+/// Emits with `severity = Info` and `agent_name = "claude"` to match the
+/// headless executor's hard-coded command.
+pub fn record_queue_prompt_event(
+    log: &mut AuditLog,
+    workspace_id: Uuid,
+    entry_id: Uuid,
+    prompt: &str,
+    enabled: bool,
+) {
+    if !enabled {
+        return;
+    }
+    log.log_with_agent(
+        workspace_id,
+        None,
+        AuditEventType::UserPrompt,
+        AuditSeverity::Info,
+        format!("Queue task prompt: {entry_id}"),
+        serde_json::json!({
+            "entry_id": entry_id.to_string(),
+            "prompt": prompt,
+            "source": "queue_executor",
+        }),
+        Some("claude".to_string()),
+    );
+}
+
+/// Convenience wrapper: read the prompt from a task file and emit the event.
+///
+/// Returns `Ok(true)` on success, `Ok(false)` if `enabled = false` (no-op),
+/// and `Err` on read failure. Callers must NOT propagate the error to skip
+/// `QueueTaskStarted` — log a warning and continue.
+pub fn record_queue_prompt_event_from_path(
+    log: &mut AuditLog,
+    workspace_id: Uuid,
+    entry_id: Uuid,
+    prompt_path: &std::path::Path,
+    enabled: bool,
+) -> Result<bool, std::io::Error> {
+    if !enabled {
+        return Ok(false);
+    }
+    let prompt = std::fs::read_to_string(prompt_path)?;
+    record_queue_prompt_event(log, workspace_id, entry_id, &prompt, true);
+    Ok(true)
+}
+
 /// Parse token usage from a `claude --print --output-format json` output log.
 ///
 /// The JSON output contains `total_cost_usd` and `usage.{input_tokens, output_tokens}`.
@@ -671,6 +725,69 @@ mod tests {
         assert_eq!(result, "Fix the bug");
 
         // Cleanup.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_record_queue_prompt_event_emits_when_enabled() {
+        let mut log = AuditLog::new(100);
+        let ws = Uuid::new_v4();
+        let entry = Uuid::new_v4();
+        record_queue_prompt_event(&mut log, ws, entry, "Fix the bug in main.rs", true);
+
+        let events = log.all();
+        assert_eq!(events.len(), 1, "exactly one UserPrompt event expected");
+        let evt = &events[0];
+        assert_eq!(evt.event_type, AuditEventType::UserPrompt);
+        assert_eq!(evt.severity, AuditSeverity::Info);
+        assert_eq!(evt.agent_name.as_deref(), Some("claude"));
+        assert_eq!(evt.workspace_id, ws);
+        assert_eq!(evt.metadata["entry_id"].as_str(), Some(entry.to_string()).as_deref());
+        assert_eq!(evt.metadata["prompt"].as_str(), Some("Fix the bug in main.rs"));
+        assert_eq!(evt.metadata["source"].as_str(), Some("queue_executor"));
+    }
+
+    #[test]
+    fn test_record_queue_prompt_event_silent_when_disabled() {
+        let mut log = AuditLog::new(100);
+        let ws = Uuid::new_v4();
+        let entry = Uuid::new_v4();
+        record_queue_prompt_event(&mut log, ws, entry, "should be ignored", false);
+        assert_eq!(log.count(), 0, "flag off must produce zero events");
+    }
+
+    #[test]
+    fn test_record_queue_prompt_event_from_path_missing_file_does_not_panic() {
+        let mut log = AuditLog::new(100);
+        let result = record_queue_prompt_event_from_path(
+            &mut log,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            std::path::Path::new("/nonexistent/queue-task-prompt.md"),
+            true,
+        );
+        assert!(result.is_err(), "missing file must surface as Err, not panic");
+        assert_eq!(log.count(), 0, "no prompt event when file unreadable");
+    }
+
+    #[test]
+    fn test_record_queue_prompt_event_from_path_reads_file() {
+        let dir = std::env::temp_dir().join(format!("thane-queue-prompt-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let task_file = dir.join("task.md");
+        std::fs::write(&task_file, "Refactor the auth flow").unwrap();
+
+        let mut log = AuditLog::new(100);
+        let ws = Uuid::new_v4();
+        let entry = Uuid::new_v4();
+        let ok = record_queue_prompt_event_from_path(&mut log, ws, entry, &task_file, true).unwrap();
+        assert!(ok);
+        assert_eq!(log.count(), 1);
+        assert_eq!(
+            log.all()[0].metadata["prompt"].as_str(),
+            Some("Refactor the auth flow")
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

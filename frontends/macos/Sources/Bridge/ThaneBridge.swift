@@ -399,6 +399,22 @@ fileprivate class UniffiHandleMap<T> {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+    typealias FfiType = UInt32
+    typealias SwiftType = UInt32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterInt32: FfiConverterPrimitive {
     typealias FfiType = Int32
     typealias SwiftType = Int32
@@ -518,6 +534,22 @@ public protocol ThaneBridgeProtocol : AnyObject {
     
     func addBrowserPanel(url: String) throws  -> String
     
+    func auditAllowClear()  -> Bool
+    
+    func auditDlqClear()  -> Bool
+    
+    func auditDlqListJson(limit: UInt64)  -> String
+    
+    func auditDlqRetry(sinkFilter: String?, eventId: String?)  -> UInt32
+    
+    func auditEncryptionEnabled()  -> Bool
+    
+    func auditRetentionDays()  -> UInt32
+    
+    func auditSecretBackendName()  -> String
+    
+    func auditSinkStatusJson()  -> String
+    
     func browserClickElement(panelId: String, selector: String) throws 
     
     func browserEvalJs(panelId: String, code: String) throws  -> String
@@ -530,7 +562,7 @@ public protocol ThaneBridgeProtocol : AnyObject {
     
     func browserTypeText(panelId: String, text: String) throws 
     
-    func clearAuditLog() 
+    func clearAuditLogAdmin(reason: String)  -> Bool
     
     func clearNotifications() 
     
@@ -588,6 +620,8 @@ public protocol ThaneBridgeProtocol : AnyObject {
     
     func nextPanel() 
     
+    func pollClaudeAppChats()  -> [BridgeChatRecord]
+    
     func prevPanel() 
     
     func queueCancel(entryId: String)  -> Bool
@@ -596,11 +630,25 @@ public protocol ThaneBridgeProtocol : AnyObject {
     
     func queueRetry(entryId: String)  -> Bool
     
+    func queueSandboxDisable() 
+    
+    func queueSandboxEnable() throws 
+    
+    func queueSandboxSetEnforcement(level: BridgeEnforcementLevel) throws 
+    
+    func queueSandboxSetNetwork(allow: Bool) throws 
+    
+    func queueSandboxStatus()  -> SandboxInfo?
+    
     func queueStatus(entryId: String)  -> QueueEntryInfo?
     
     func queueSubmit(content: String, workspaceId: String?, priority: Int32)  -> String
     
+    func queueSubmitWithDepends(content: String, workspaceId: String?, priority: Int32, dependsOn: String?)  -> String
+    
     func renameWorkspace(id: String, title: String) throws  -> Bool
+    
+    func reorderPanel(panelId: String, newIndex: UInt32)  -> Bool
     
     func restoreSession() throws  -> SessionInfo
     
@@ -639,6 +687,8 @@ public protocol ThaneBridgeProtocol : AnyObject {
     func stopIpcServer() 
     
     func unreadNotificationCount()  -> UInt64
+    
+    func verifyAuditIntegrity()  -> AuditVerifyResult
     
 }
 
@@ -715,6 +765,65 @@ open func addBrowserPanel(url: String)throws  -> String {
 })
 }
     
+open func auditAllowClear() -> Bool {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_thane_bridge_fn_method_thanebridge_audit_allow_clear(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+open func auditDlqClear() -> Bool {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_thane_bridge_fn_method_thanebridge_audit_dlq_clear(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+open func auditDlqListJson(limit: UInt64) -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_thane_bridge_fn_method_thanebridge_audit_dlq_list_json(self.uniffiClonePointer(),
+        FfiConverterUInt64.lower(limit),$0
+    )
+})
+}
+    
+open func auditDlqRetry(sinkFilter: String?, eventId: String?) -> UInt32 {
+    return try!  FfiConverterUInt32.lift(try! rustCall() {
+    uniffi_thane_bridge_fn_method_thanebridge_audit_dlq_retry(self.uniffiClonePointer(),
+        FfiConverterOptionString.lower(sinkFilter),
+        FfiConverterOptionString.lower(eventId),$0
+    )
+})
+}
+    
+open func auditEncryptionEnabled() -> Bool {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_thane_bridge_fn_method_thanebridge_audit_encryption_enabled(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+open func auditRetentionDays() -> UInt32 {
+    return try!  FfiConverterUInt32.lift(try! rustCall() {
+    uniffi_thane_bridge_fn_method_thanebridge_audit_retention_days(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+open func auditSecretBackendName() -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_thane_bridge_fn_method_thanebridge_audit_secret_backend_name(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+open func auditSinkStatusJson() -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_thane_bridge_fn_method_thanebridge_audit_sink_status_json(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
 open func browserClickElement(panelId: String, selector: String)throws  {try rustCallWithError(FfiConverterTypeBridgeError.lift) {
     uniffi_thane_bridge_fn_method_thanebridge_browser_click_element(self.uniffiClonePointer(),
         FfiConverterString.lower(panelId),
@@ -764,10 +873,12 @@ open func browserTypeText(panelId: String, text: String)throws  {try rustCallWit
 }
 }
     
-open func clearAuditLog() {try! rustCall() {
-    uniffi_thane_bridge_fn_method_thanebridge_clear_audit_log(self.uniffiClonePointer(),$0
+open func clearAuditLogAdmin(reason: String) -> Bool {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_thane_bridge_fn_method_thanebridge_clear_audit_log_admin(self.uniffiClonePointer(),
+        FfiConverterString.lower(reason),$0
     )
-}
+})
 }
     
 open func clearNotifications() {try! rustCall() {
@@ -969,6 +1080,13 @@ open func nextPanel() {try! rustCall() {
 }
 }
     
+open func pollClaudeAppChats() -> [BridgeChatRecord] {
+    return try!  FfiConverterSequenceTypeBridgeChatRecord.lift(try! rustCall() {
+    uniffi_thane_bridge_fn_method_thanebridge_poll_claude_app_chats(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
 open func prevPanel() {try! rustCall() {
     uniffi_thane_bridge_fn_method_thanebridge_prev_panel(self.uniffiClonePointer(),$0
     )
@@ -998,6 +1116,39 @@ open func queueRetry(entryId: String) -> Bool {
 })
 }
     
+open func queueSandboxDisable() {try! rustCall() {
+    uniffi_thane_bridge_fn_method_thanebridge_queue_sandbox_disable(self.uniffiClonePointer(),$0
+    )
+}
+}
+    
+open func queueSandboxEnable()throws  {try rustCallWithError(FfiConverterTypeBridgeError.lift) {
+    uniffi_thane_bridge_fn_method_thanebridge_queue_sandbox_enable(self.uniffiClonePointer(),$0
+    )
+}
+}
+    
+open func queueSandboxSetEnforcement(level: BridgeEnforcementLevel)throws  {try rustCallWithError(FfiConverterTypeBridgeError.lift) {
+    uniffi_thane_bridge_fn_method_thanebridge_queue_sandbox_set_enforcement(self.uniffiClonePointer(),
+        FfiConverterTypeBridgeEnforcementLevel.lower(level),$0
+    )
+}
+}
+    
+open func queueSandboxSetNetwork(allow: Bool)throws  {try rustCallWithError(FfiConverterTypeBridgeError.lift) {
+    uniffi_thane_bridge_fn_method_thanebridge_queue_sandbox_set_network(self.uniffiClonePointer(),
+        FfiConverterBool.lower(allow),$0
+    )
+}
+}
+    
+open func queueSandboxStatus() -> SandboxInfo? {
+    return try!  FfiConverterOptionTypeSandboxInfo.lift(try! rustCall() {
+    uniffi_thane_bridge_fn_method_thanebridge_queue_sandbox_status(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
 open func queueStatus(entryId: String) -> QueueEntryInfo? {
     return try!  FfiConverterOptionTypeQueueEntryInfo.lift(try! rustCall() {
     uniffi_thane_bridge_fn_method_thanebridge_queue_status(self.uniffiClonePointer(),
@@ -1016,11 +1167,31 @@ open func queueSubmit(content: String, workspaceId: String?, priority: Int32) ->
 })
 }
     
+open func queueSubmitWithDepends(content: String, workspaceId: String?, priority: Int32, dependsOn: String?) -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_thane_bridge_fn_method_thanebridge_queue_submit_with_depends(self.uniffiClonePointer(),
+        FfiConverterString.lower(content),
+        FfiConverterOptionString.lower(workspaceId),
+        FfiConverterInt32.lower(priority),
+        FfiConverterOptionString.lower(dependsOn),$0
+    )
+})
+}
+    
 open func renameWorkspace(id: String, title: String)throws  -> Bool {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeBridgeError.lift) {
     uniffi_thane_bridge_fn_method_thanebridge_rename_workspace(self.uniffiClonePointer(),
         FfiConverterString.lower(id),
         FfiConverterString.lower(title),$0
+    )
+})
+}
+    
+open func reorderPanel(panelId: String, newIndex: UInt32) -> Bool {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_thane_bridge_fn_method_thanebridge_reorder_panel(self.uniffiClonePointer(),
+        FfiConverterString.lower(panelId),
+        FfiConverterUInt32.lower(newIndex),$0
     )
 })
 }
@@ -1164,6 +1335,13 @@ open func stopIpcServer() {try! rustCall() {
 open func unreadNotificationCount() -> UInt64 {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
     uniffi_thane_bridge_fn_method_thanebridge_unread_notification_count(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+open func verifyAuditIntegrity() -> AuditVerifyResult {
+    return try!  FfiConverterTypeAuditVerifyResult.lift(try! rustCall() {
+    uniffi_thane_bridge_fn_method_thanebridge_verify_audit_integrity(self.uniffiClonePointer(),$0
     )
 })
 }
@@ -1334,6 +1512,170 @@ public func FfiConverterTypeAuditEventInfo_lift(_ buf: RustBuffer) throws -> Aud
 #endif
 public func FfiConverterTypeAuditEventInfo_lower(_ value: AuditEventInfo) -> RustBuffer {
     return FfiConverterTypeAuditEventInfo.lower(value)
+}
+
+
+public struct AuditVerifyResult {
+    public var eventsChecked: UInt32
+    public var verified: Bool
+    public var failureSummary: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(eventsChecked: UInt32, verified: Bool, failureSummary: String?) {
+        self.eventsChecked = eventsChecked
+        self.verified = verified
+        self.failureSummary = failureSummary
+    }
+}
+
+
+
+extension AuditVerifyResult: Equatable, Hashable {
+    public static func ==(lhs: AuditVerifyResult, rhs: AuditVerifyResult) -> Bool {
+        if lhs.eventsChecked != rhs.eventsChecked {
+            return false
+        }
+        if lhs.verified != rhs.verified {
+            return false
+        }
+        if lhs.failureSummary != rhs.failureSummary {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(eventsChecked)
+        hasher.combine(verified)
+        hasher.combine(failureSummary)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAuditVerifyResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AuditVerifyResult {
+        return
+            try AuditVerifyResult(
+                eventsChecked: FfiConverterUInt32.read(from: &buf), 
+                verified: FfiConverterBool.read(from: &buf), 
+                failureSummary: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AuditVerifyResult, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.eventsChecked, into: &buf)
+        FfiConverterBool.write(value.verified, into: &buf)
+        FfiConverterOptionString.write(value.failureSummary, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAuditVerifyResult_lift(_ buf: RustBuffer) throws -> AuditVerifyResult {
+    return try FfiConverterTypeAuditVerifyResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAuditVerifyResult_lower(_ value: AuditVerifyResult) -> RustBuffer {
+    return FfiConverterTypeAuditVerifyResult.lower(value)
+}
+
+
+public struct BridgeChatRecord {
+    public var conversationId: String
+    public var name: String
+    public var orgName: String
+    public var createdAt: String?
+    public var updatedAt: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(conversationId: String, name: String, orgName: String, createdAt: String?, updatedAt: String?) {
+        self.conversationId = conversationId
+        self.name = name
+        self.orgName = orgName
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+
+
+extension BridgeChatRecord: Equatable, Hashable {
+    public static func ==(lhs: BridgeChatRecord, rhs: BridgeChatRecord) -> Bool {
+        if lhs.conversationId != rhs.conversationId {
+            return false
+        }
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.orgName != rhs.orgName {
+            return false
+        }
+        if lhs.createdAt != rhs.createdAt {
+            return false
+        }
+        if lhs.updatedAt != rhs.updatedAt {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(conversationId)
+        hasher.combine(name)
+        hasher.combine(orgName)
+        hasher.combine(createdAt)
+        hasher.combine(updatedAt)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeBridgeChatRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BridgeChatRecord {
+        return
+            try BridgeChatRecord(
+                conversationId: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                orgName: FfiConverterString.read(from: &buf), 
+                createdAt: FfiConverterOptionString.read(from: &buf), 
+                updatedAt: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: BridgeChatRecord, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.orgName, into: &buf)
+        FfiConverterOptionString.write(value.createdAt, into: &buf)
+        FfiConverterOptionString.write(value.updatedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBridgeChatRecord_lift(_ buf: RustBuffer) throws -> BridgeChatRecord {
+    return try FfiConverterTypeBridgeChatRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBridgeChatRecord_lower(_ value: BridgeChatRecord) -> RustBuffer {
+    return FfiConverterTypeBridgeChatRecord.lower(value)
 }
 
 
@@ -1708,7 +2050,7 @@ public struct ProjectCostDto {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(sessionCostUsd: Double, sessionInputTokens: UInt64, sessionOutputTokens: UInt64, sessionCacheReadTokens: UInt64, sessionCacheWriteTokens: UInt64, alltimeCostUsd: Double, alltimeInputTokens: UInt64, alltimeOutputTokens: UInt64, alltimeCacheReadTokens: UInt64, alltimeCacheWriteTokens: UInt64, sessionCount: UInt64, planName: String = "Pro", displayMode: String = "dollar", fiveHourUtilization: Double? = nil, sevenDayUtilization: Double? = nil) {
+    public init(sessionCostUsd: Double, sessionInputTokens: UInt64, sessionOutputTokens: UInt64, sessionCacheReadTokens: UInt64, sessionCacheWriteTokens: UInt64, alltimeCostUsd: Double, alltimeInputTokens: UInt64, alltimeOutputTokens: UInt64, alltimeCacheReadTokens: UInt64, alltimeCacheWriteTokens: UInt64, sessionCount: UInt64, planName: String, displayMode: String, fiveHourUtilization: Double?, sevenDayUtilization: Double?) {
         self.sessionCostUsd = sessionCostUsd
         self.sessionInputTokens = sessionInputTokens
         self.sessionOutputTokens = sessionOutputTokens
@@ -1806,20 +2148,20 @@ public struct FfiConverterTypeProjectCostDTO: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProjectCostDto {
         return
             try ProjectCostDto(
-                sessionCostUsd: FfiConverterDouble.read(from: &buf),
-                sessionInputTokens: FfiConverterUInt64.read(from: &buf),
-                sessionOutputTokens: FfiConverterUInt64.read(from: &buf),
-                sessionCacheReadTokens: FfiConverterUInt64.read(from: &buf),
-                sessionCacheWriteTokens: FfiConverterUInt64.read(from: &buf),
-                alltimeCostUsd: FfiConverterDouble.read(from: &buf),
-                alltimeInputTokens: FfiConverterUInt64.read(from: &buf),
-                alltimeOutputTokens: FfiConverterUInt64.read(from: &buf),
-                alltimeCacheReadTokens: FfiConverterUInt64.read(from: &buf),
-                alltimeCacheWriteTokens: FfiConverterUInt64.read(from: &buf),
-                sessionCount: FfiConverterUInt64.read(from: &buf),
-                planName: FfiConverterString.read(from: &buf),
-                displayMode: FfiConverterString.read(from: &buf),
-                fiveHourUtilization: FfiConverterOptionDouble.read(from: &buf),
+                sessionCostUsd: FfiConverterDouble.read(from: &buf), 
+                sessionInputTokens: FfiConverterUInt64.read(from: &buf), 
+                sessionOutputTokens: FfiConverterUInt64.read(from: &buf), 
+                sessionCacheReadTokens: FfiConverterUInt64.read(from: &buf), 
+                sessionCacheWriteTokens: FfiConverterUInt64.read(from: &buf), 
+                alltimeCostUsd: FfiConverterDouble.read(from: &buf), 
+                alltimeInputTokens: FfiConverterUInt64.read(from: &buf), 
+                alltimeOutputTokens: FfiConverterUInt64.read(from: &buf), 
+                alltimeCacheReadTokens: FfiConverterUInt64.read(from: &buf), 
+                alltimeCacheWriteTokens: FfiConverterUInt64.read(from: &buf), 
+                sessionCount: FfiConverterUInt64.read(from: &buf), 
+                planName: FfiConverterString.read(from: &buf), 
+                displayMode: FfiConverterString.read(from: &buf), 
+                fiveHourUtilization: FfiConverterOptionDouble.read(from: &buf), 
                 sevenDayUtilization: FfiConverterOptionDouble.read(from: &buf)
         )
     }
@@ -1872,10 +2214,12 @@ public struct QueueEntryInfo {
     public var inputTokens: UInt64
     public var outputTokens: UInt64
     public var estimatedCostUsd: Double
+    public var model: String?
+    public var dependsOn: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, content: String, workspaceId: String?, priority: Int32, status: BridgeQueueEntryStatus, createdAt: String, startedAt: String?, completedAt: String?, error: String?, inputTokens: UInt64, outputTokens: UInt64, estimatedCostUsd: Double) {
+    public init(id: String, content: String, workspaceId: String?, priority: Int32, status: BridgeQueueEntryStatus, createdAt: String, startedAt: String?, completedAt: String?, error: String?, inputTokens: UInt64, outputTokens: UInt64, estimatedCostUsd: Double, model: String?, dependsOn: String?) {
         self.id = id
         self.content = content
         self.workspaceId = workspaceId
@@ -1888,6 +2232,8 @@ public struct QueueEntryInfo {
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
         self.estimatedCostUsd = estimatedCostUsd
+        self.model = model
+        self.dependsOn = dependsOn
     }
 }
 
@@ -1931,6 +2277,12 @@ extension QueueEntryInfo: Equatable, Hashable {
         if lhs.estimatedCostUsd != rhs.estimatedCostUsd {
             return false
         }
+        if lhs.model != rhs.model {
+            return false
+        }
+        if lhs.dependsOn != rhs.dependsOn {
+            return false
+        }
         return true
     }
 
@@ -1947,6 +2299,8 @@ extension QueueEntryInfo: Equatable, Hashable {
         hasher.combine(inputTokens)
         hasher.combine(outputTokens)
         hasher.combine(estimatedCostUsd)
+        hasher.combine(model)
+        hasher.combine(dependsOn)
     }
 }
 
@@ -1969,7 +2323,9 @@ public struct FfiConverterTypeQueueEntryInfo: FfiConverterRustBuffer {
                 error: FfiConverterOptionString.read(from: &buf), 
                 inputTokens: FfiConverterUInt64.read(from: &buf), 
                 outputTokens: FfiConverterUInt64.read(from: &buf), 
-                estimatedCostUsd: FfiConverterDouble.read(from: &buf)
+                estimatedCostUsd: FfiConverterDouble.read(from: &buf), 
+                model: FfiConverterOptionString.read(from: &buf), 
+                dependsOn: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1986,6 +2342,8 @@ public struct FfiConverterTypeQueueEntryInfo: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.inputTokens, into: &buf)
         FfiConverterUInt64.write(value.outputTokens, into: &buf)
         FfiConverterDouble.write(value.estimatedCostUsd, into: &buf)
+        FfiConverterOptionString.write(value.model, into: &buf)
+        FfiConverterOptionString.write(value.dependsOn, into: &buf)
     }
 }
 
@@ -2352,7 +2710,7 @@ public struct TokenLimitsDto {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(planName: String, hasCaps: Bool, displayMode: String = "dollar", fiveHourUtilization: Double?, fiveHourResetsAt: String?, sevenDayUtilization: Double?, sevenDayResetsAt: String?) {
+    public init(planName: String, hasCaps: Bool, displayMode: String, fiveHourUtilization: Double?, fiveHourResetsAt: String?, sevenDayUtilization: Double?, sevenDayResetsAt: String?) {
         self.planName = planName
         self.hasCaps = hasCaps
         self.displayMode = displayMode
@@ -2410,12 +2768,12 @@ public struct FfiConverterTypeTokenLimitsDTO: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TokenLimitsDto {
         return
             try TokenLimitsDto(
-                planName: FfiConverterString.read(from: &buf),
-                hasCaps: FfiConverterBool.read(from: &buf),
-                displayMode: FfiConverterString.read(from: &buf),
-                fiveHourUtilization: FfiConverterOptionDouble.read(from: &buf),
-                fiveHourResetsAt: FfiConverterOptionString.read(from: &buf),
-                sevenDayUtilization: FfiConverterOptionDouble.read(from: &buf),
+                planName: FfiConverterString.read(from: &buf), 
+                hasCaps: FfiConverterBool.read(from: &buf), 
+                displayMode: FfiConverterString.read(from: &buf), 
+                fiveHourUtilization: FfiConverterOptionDouble.read(from: &buf), 
+                fiveHourResetsAt: FfiConverterOptionString.read(from: &buf), 
+                sevenDayUtilization: FfiConverterOptionDouble.read(from: &buf), 
                 sevenDayResetsAt: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -3669,6 +4027,31 @@ fileprivate struct FfiConverterSequenceTypeAuditEventInfo: FfiConverterRustBuffe
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeBridgeChatRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [BridgeChatRecord]
+
+    public static func write(_ value: [BridgeChatRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeBridgeChatRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [BridgeChatRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [BridgeChatRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeBridgeChatRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeClosedWorkspaceInfo: FfiConverterRustBuffer {
     typealias SwiftType = [ClosedWorkspaceInfo]
 
@@ -3837,6 +4220,30 @@ private var initializationResult: InitializationResult = {
     if (uniffi_thane_bridge_checksum_method_thanebridge_add_browser_panel() != 33240) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_thane_bridge_checksum_method_thanebridge_audit_allow_clear() != 58448) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_thane_bridge_checksum_method_thanebridge_audit_dlq_clear() != 59019) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_thane_bridge_checksum_method_thanebridge_audit_dlq_list_json() != 43070) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_thane_bridge_checksum_method_thanebridge_audit_dlq_retry() != 56862) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_thane_bridge_checksum_method_thanebridge_audit_encryption_enabled() != 9576) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_thane_bridge_checksum_method_thanebridge_audit_retention_days() != 31982) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_thane_bridge_checksum_method_thanebridge_audit_secret_backend_name() != 61573) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_thane_bridge_checksum_method_thanebridge_audit_sink_status_json() != 62184) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_thane_bridge_checksum_method_thanebridge_browser_click_element() != 20740) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3855,7 +4262,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_thane_bridge_checksum_method_thanebridge_browser_type_text() != 8393) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_thane_bridge_checksum_method_thanebridge_clear_audit_log() != 28322) {
+    if (uniffi_thane_bridge_checksum_method_thanebridge_clear_audit_log_admin() != 47725) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_thane_bridge_checksum_method_thanebridge_clear_notifications() != 27845) {
@@ -3942,6 +4349,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_thane_bridge_checksum_method_thanebridge_next_panel() != 22694) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_thane_bridge_checksum_method_thanebridge_poll_claude_app_chats() != 31011) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_thane_bridge_checksum_method_thanebridge_prev_panel() != 53063) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3954,13 +4364,34 @@ private var initializationResult: InitializationResult = {
     if (uniffi_thane_bridge_checksum_method_thanebridge_queue_retry() != 38561) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_thane_bridge_checksum_method_thanebridge_queue_sandbox_disable() != 30050) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_thane_bridge_checksum_method_thanebridge_queue_sandbox_enable() != 34253) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_thane_bridge_checksum_method_thanebridge_queue_sandbox_set_enforcement() != 24752) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_thane_bridge_checksum_method_thanebridge_queue_sandbox_set_network() != 32914) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_thane_bridge_checksum_method_thanebridge_queue_sandbox_status() != 49746) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_thane_bridge_checksum_method_thanebridge_queue_status() != 14417) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_thane_bridge_checksum_method_thanebridge_queue_submit() != 39936) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_thane_bridge_checksum_method_thanebridge_queue_submit_with_depends() != 1262) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_thane_bridge_checksum_method_thanebridge_rename_workspace() != 48278) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_thane_bridge_checksum_method_thanebridge_reorder_panel() != 49513) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_thane_bridge_checksum_method_thanebridge_restore_session() != 65022) {
@@ -4018,6 +4449,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_thane_bridge_checksum_method_thanebridge_unread_notification_count() != 18118) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_thane_bridge_checksum_method_thanebridge_verify_audit_integrity() != 4092) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_thane_bridge_checksum_constructor_thanebridge_new() != 11736) {

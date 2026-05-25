@@ -8,6 +8,7 @@ pub enum Method {
     Ping,
     GetVersion,
     GetConfig,
+    SystemStatus,
 
     // Workspace management
     WorkspaceList,
@@ -71,6 +72,13 @@ pub enum Method {
     AuditExport,
     AuditClear,
     AuditSetSensitivePolicy,
+    AuditVerify,
+
+    // External audit sinks (Phase 5)
+    AuditSinkStatus,
+    AuditDlqList,
+    AuditDlqRetry,
+    AuditDlqClear,
 }
 
 impl Method {
@@ -80,6 +88,7 @@ impl Method {
             "ping" => Some(Self::Ping),
             "get_version" => Some(Self::GetVersion),
             "get_config" => Some(Self::GetConfig),
+            "system.status" => Some(Self::SystemStatus),
 
             "workspace.list" => Some(Self::WorkspaceList),
             "workspace.create" => Some(Self::WorkspaceCreate),
@@ -133,6 +142,12 @@ impl Method {
             "audit.export" => Some(Self::AuditExport),
             "audit.clear" => Some(Self::AuditClear),
             "audit.set_sensitive_policy" => Some(Self::AuditSetSensitivePolicy),
+            "audit.verify" => Some(Self::AuditVerify),
+
+            "audit.sink_status" => Some(Self::AuditSinkStatus),
+            "audit.dlq_list" => Some(Self::AuditDlqList),
+            "audit.dlq_retry" => Some(Self::AuditDlqRetry),
+            "audit.dlq_clear" => Some(Self::AuditDlqClear),
 
             _ => None,
         }
@@ -206,6 +221,11 @@ mod tests {
             ("audit.export", Method::AuditExport),
             ("audit.clear", Method::AuditClear),
             ("audit.set_sensitive_policy", Method::AuditSetSensitivePolicy),
+            ("audit.verify", Method::AuditVerify),
+            ("audit.sink_status", Method::AuditSinkStatus),
+            ("audit.dlq_list", Method::AuditDlqList),
+            ("audit.dlq_retry", Method::AuditDlqRetry),
+            ("audit.dlq_clear", Method::AuditDlqClear),
         ];
 
         for (name, expected) in &all {
@@ -215,8 +235,8 @@ mod tests {
                 "Method::parse({name:?}) should return {expected:?}"
             );
         }
-        // Verify we tested every variant (46 total).
-        assert_eq!(all.len(), 46);
+        // Verify we tested every variant (now 51 with Phase 5 sink methods).
+        assert_eq!(all.len(), 51);
     }
 
     #[test]

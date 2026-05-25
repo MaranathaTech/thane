@@ -59,6 +59,20 @@ impl MacosDirs {
         self.data_dir().join("plans")
     }
 
+    /// Enterprise policy file path. Root-owned (mode 0644). MDM systems
+    /// (Jamf, Intune, Munki, Kandji) deploy this on managed devices. See
+    /// `thane-core::policy`.
+    pub fn policy_file_path(&self) -> PathBuf {
+        PathBuf::from(format!("/Library/Application Support/{APP_NAME}/policy.json"))
+    }
+
+    /// macOS Managed Preferences plist path. Apple MDM tools prefer this
+    /// mechanism; when both this and `policy_file_path()` are present, this
+    /// one wins per the merge order documented in `thane-core::policy`.
+    pub fn managed_prefs_path(&self) -> PathBuf {
+        PathBuf::from("/Library/Managed Preferences/com.thane.app.plist")
+    }
+
     /// Ensure all required directories exist.
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(self.config_dir())?;

@@ -240,6 +240,15 @@ pub struct AuditEventInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct AuditVerifyResult {
+    pub events_checked: u32,
+    pub verified: bool,
+    /// Human-readable summary of the first failure when `verified == false`.
+    /// `None` when `verified == true`.
+    pub failure_summary: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct BridgeChatRecord {
     pub conversation_id: String,
     pub name: String,
@@ -378,15 +387,42 @@ struct BridgeState {
 
 pub struct ThaneBridge {
     state: Arc<Mutex<BridgeState>>,
+    /// Phase 5: external-sink dispatcher. `None` when no sink is enabled.
+    /// Outside the BridgeState mutex so the RPC/UI path can snapshot status
+    /// without contending with the audit-recording path.
+    dispatcher: Option<Arc<thane_audit_sink::AuditDispatcher>>,
+    /// DLQ handle, valid regardless of whether the dispatcher is configured.
+    /// Lets the UI inspect historical DLQ entries from a previous run.
+    dlq: Arc<thane_audit_sink::DeadLetterQueue>,
 }
 
 impl ThaneBridge {
     pub fn new(config_path: Option<String>) -> Result<Self, BridgeError> {
-        let config = if let Some(path) = config_path {
+        let mut config = if let Some(path) = config_path {
             Config::load(std::path::Path::new(&path))
                 .map_err(|e| BridgeError::ConfigError(e.to_string()))?
         } else {
             Config::load_default()
+        };
+
+        // Phase 6b: load any deployed enterprise policy and stack it on top
+        // of the user config. A failed parse must NOT block startup — we log
+        // an Alert-severity audit event and continue with user config only.
+        let policy_load_failure = match thane_core::policy::load_for_platform() {
+            Ok(Some(policy)) => {
+                tracing::info!(
+                    "enterprise policy active (issued by {:?}, {} locked keys)",
+                    policy.issued_by,
+                    policy.locked_keys.len()
+                );
+                config.apply_policy(std::sync::Arc::new(policy));
+                None
+            }
+            Ok(None) => None,
+            Err(e) => {
+                tracing::error!("enterprise policy load failed: {e}; continuing with user config");
+                Some(e.to_string())
+            }
         };
 
         // Use platform-appropriate directories.
@@ -404,10 +440,64 @@ impl ThaneBridge {
             tracing::warn!("Failed to create platform directories: {e}");
         }
 
+        if !thane_platform::claude_md::has_thane_instructions() {
+            match thane_platform::claude_md::inject_thane_instructions() {
+                Ok(true) => tracing::info!("Injected thane instructions into ~/.claude/CLAUDE.md"),
+                Ok(false) => {}
+                Err(e) => tracing::warn!("Failed to inject ~/.claude/CLAUDE.md instructions: {e}"),
+            }
+        }
+
+        // Initialize the audit log, enabling HMAC signing if policy allows and
+        // a key is available from the platform secret store. Redaction policy
+        // is applied to every event recorded — see audit_redaction.rs.
+        let mut audit_log = AuditLog::new(10000)
+            .with_redaction_policy(config.audit_redaction_policy());
+        let secret_store = thane_platform::default_secret_store();
+        if config.audit_signing_enabled() {
+            match thane_core::audit_keys::try_audit_hmac_key(secret_store.as_ref()) {
+                Ok(key) => audit_log.set_signing_key(key),
+                Err(e) => tracing::warn!(
+                    "audit-signing-enabled=true but HMAC key unavailable; events will be unsigned: {e}"
+                ),
+            }
+        } else {
+            tracing::warn!("audit-signing-enabled = false; events will not be cryptographically signed");
+        }
+
+        // Phase 5: build the external-sink dispatcher (if any sink enabled).
+        // The DLQ handle is always created so the UI can read historical
+        // entries even when no sink is configured.
+        let dispatcher = thane_audit_sink::build_dispatcher_from_config(
+            &config,
+            secret_store.as_ref(),
+            sessions_dir.clone(),
+        )
+        .map(Arc::new);
+        if let Some(d) = dispatcher.as_ref() {
+            audit_log.set_forwarder(Arc::new(d.handle()));
+            tracing::info!("audit external sinks active");
+        }
+        let dlq = Arc::new(thane_audit_sink::DeadLetterQueue::new(sessions_dir.clone()));
+
+        // Emit any deferred policy-load failure now that the audit log is
+        // configured. Alert severity so the security team sees it in SIEM.
+        if let Some(err) = policy_load_failure {
+            use thane_core::audit::{AuditEventType, AuditSeverity};
+            audit_log.log(
+                uuid::Uuid::nil(),
+                None,
+                AuditEventType::Custom("enterprise_policy_load_failed".to_string()),
+                AuditSeverity::Alert,
+                "Failed to load enterprise policy; falling back to user config",
+                serde_json::json!({ "error": err }),
+            );
+        }
+
         let state = BridgeState {
             workspace_mgr: WorkspaceManager::new(),
             config,
-            audit_log: AuditLog::new(10000),
+            audit_log,
             agent_queue: AgentQueue::new(),
             session_store,
             sessions_dir,
@@ -420,6 +510,8 @@ impl ThaneBridge {
 
         Ok(Self {
             state: Arc::new(Mutex::new(state)),
+            dispatcher,
+            dlq,
         })
     }
 
@@ -741,10 +833,219 @@ impl ThaneBridge {
         s.audit_log.export_json().unwrap_or_else(|_| "[]".to_string())
     }
 
-    pub fn clear_audit_log(&self) {
+    /// Clear the in-memory audit log, gated by `audit-allow-clear`.
+    ///
+    /// Returns `true` when the clear succeeded, `false` when the policy denied it
+    /// (so the UI can surface the rejection). `reason` is recorded in the marker
+    /// event metadata; the UI must enforce a non-empty value.
+    pub fn clear_audit_log_admin(&self, reason: String) -> bool {
         if let Ok(mut s) = self.state.lock() {
-            s.audit_log.clear();
+            let allow = s.config.audit_allow_clear();
+            return s.audit_log.clear_admin(reason, allow).is_ok();
         }
+        false
+    }
+
+    /// Whether the `audit-allow-clear` policy permits the UI to surface the
+    /// Clear button. The macOS frontend uses this to hide the control.
+    pub fn audit_allow_clear(&self) -> bool {
+        self.state
+            .lock()
+            .map(|s| s.config.audit_allow_clear())
+            .unwrap_or(false)
+    }
+
+    /// Configured retention (in days) for rotated audit logs. `0` means forever.
+    /// Bridges `audit-retention-days` to the Swift frontend so its labels stay
+    /// in sync with the actual policy.
+    pub fn audit_retention_days(&self) -> u32 {
+        self.state
+            .lock()
+            .map(|s| s.config.audit_retention_days())
+            .unwrap_or(90)
+    }
+
+    /// Whether `audit-encryption-enabled = true` is in effect.
+    ///
+    /// Drives the lock-icon indicator in the audit panel (Phase 4).
+    pub fn audit_encryption_enabled(&self) -> bool {
+        self.state
+            .lock()
+            .map(|s| s.config.audit_encryption_enabled())
+            .unwrap_or(true)
+    }
+
+    /// Human-readable name of the platform secret-store backend (e.g.
+    /// "Keychain", "Secret Service / local fallback"). The audit panel renders
+    /// this in the encryption tooltip so operators can see at a glance where
+    /// the audit key lives.
+    pub fn audit_secret_backend_name(&self) -> String {
+        thane_platform::default_secret_store_backend_name().to_string()
+    }
+
+    // ── Phase 6b: enterprise policy accessors ──
+
+    /// Whether an enterprise policy is currently active. Drives the policy
+    /// banner + locked-key indicators in the audit + settings panels.
+    pub fn enterprise_policy_active(&self) -> bool {
+        self.state
+            .lock()
+            .map(|s| s.config.policy().is_some())
+            .unwrap_or(false)
+    }
+
+    /// Issuer string set in the active enterprise policy (e.g.
+    /// `"Acme Corp IT Security"`). Empty when no policy is active.
+    pub fn enterprise_policy_issuer(&self) -> String {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|s| s.config.policy().map(|p| p.issued_by.clone()))
+            .unwrap_or_default()
+    }
+
+    /// Optional `ui_banner` text the active policy wants shown above the
+    /// settings + audit panels.
+    pub fn enterprise_policy_banner(&self) -> Option<String> {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|s| s.config.policy().and_then(|p| p.ui_banner.clone()))
+    }
+
+    /// All keys locked by the active enterprise policy, sorted for stable
+    /// rendering. Empty when no policy is active.
+    pub fn enterprise_policy_locked_keys(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .state
+            .lock()
+            .ok()
+            .map(|s| {
+                s.config
+                    .policy()
+                    .map(|p| p.locked_keys.keys().cloned().collect())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    /// Whether `key` is locked by the active enterprise policy. UI controls
+    /// for locked keys should be rendered disabled with a lock icon and a
+    /// tooltip naming the issuer.
+    pub fn config_is_locked(&self, key: String) -> bool {
+        self.state
+            .lock()
+            .map(|s| s.config.is_locked(&key))
+            .unwrap_or(false)
+    }
+
+    /// Verify the cryptographic integrity of the in-memory audit log.
+    ///
+    /// Powers the "Verify Integrity" button in the macOS audit panel. Returns
+    /// a summary the UI can show in a modal: how many events were checked,
+    /// whether the chain held, and what the first failure was if not.
+    pub fn verify_audit_integrity(&self) -> AuditVerifyResult {
+        use thane_core::audit::VerifyFailureKind;
+        let Ok(s) = self.state.lock() else {
+            return AuditVerifyResult {
+                events_checked: 0,
+                verified: false,
+                failure_summary: Some("bridge state lock poisoned".to_string()),
+            };
+        };
+        let r = s.audit_log.verify_integrity();
+        let failure_summary = r.first_failure.as_ref().map(|f| {
+            let kind = match f.kind {
+                VerifyFailureKind::HmacMismatch => "hmac_mismatch",
+                VerifyFailureKind::ChainBreak => "chain_break",
+                VerifyFailureKind::MissingHmac => "missing_hmac",
+                VerifyFailureKind::UnparseableEvent => "unparseable_event",
+            };
+            format!(
+                "kind: {kind}; event_index: {}; event_id: {}",
+                f.event_index, f.event_id
+            )
+        });
+        AuditVerifyResult {
+            events_checked: r.events_checked,
+            verified: r.verified,
+            failure_summary,
+        }
+    }
+
+    // ── Phase 5: external audit sinks ──
+
+    /// JSON snapshot of every configured sink's runtime state. Returns
+    /// `{"sinks": []}` when no external sink is enabled.
+    pub fn audit_sink_status_json(&self) -> String {
+        let report = match self.dispatcher.as_ref() {
+            Some(d) => d.status_snapshot_blocking(),
+            None => thane_audit_sink::SinkStatusReport { sinks: vec![] },
+        };
+        serde_json::to_string(&report).unwrap_or_else(|_| String::from("{\"sinks\":[]}"))
+    }
+
+    /// JSON listing of the dead-letter queue (newest entries first), capped
+    /// at `limit` for the `entries` field. `total` is the full count.
+    pub fn audit_dlq_list_json(&self, limit: u64) -> String {
+        let mut entries = match self.dlq.read_all() {
+            Ok(v) => v,
+            Err(e) => {
+                return format!("{{\"total\":0,\"returned\":0,\"entries\":[],\"error\":\"{}\"}}", e);
+            }
+        };
+        entries.reverse();
+        let total = entries.len();
+        entries.truncate(limit as usize);
+        let returned = entries.len();
+        serde_json::json!({
+            "total": total,
+            "returned": returned,
+            "entries": entries,
+        })
+        .to_string()
+    }
+
+    /// Re-enqueue every DLQ entry (optionally filtered by sink name or audit
+    /// event id) into the dispatcher. Returns the number retried. `0` when no
+    /// dispatcher is configured.
+    pub fn audit_dlq_retry(
+        &self,
+        sink_filter: Option<String>,
+        event_id: Option<String>,
+    ) -> u32 {
+        let Some(dispatcher) = self.dispatcher.as_ref() else { return 0 };
+        let entries = match self.dlq.read_all() {
+            Ok(v) => v,
+            Err(_) => return 0,
+        };
+        let mut count = 0u32;
+        for entry in &entries {
+            if let Some(s) = sink_filter.as_deref() {
+                if entry.sink != s { continue; }
+            }
+            if let Some(eid) = event_id.as_deref() {
+                if entry.event.id.to_string() != eid { continue; }
+            }
+            dispatcher.retry_event(&entry.event);
+            count += 1;
+        }
+        count
+    }
+
+    /// Truncate the DLQ. Refused (returns false) unless audit-allow-clear is
+    /// true in config — same gate that protects the regular audit-log clear.
+    pub fn audit_dlq_clear(&self) -> bool {
+        let allow = match self.state.lock() {
+            Ok(s) => s.config.audit_allow_clear(),
+            Err(_) => false,
+        };
+        if !allow {
+            return false;
+        }
+        self.dlq.clear().is_ok()
     }
 
     /// Poll for new Claude.ai conversations. Rate-limited to 60 seconds internally.
@@ -1766,19 +2067,47 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_audit_log() {
+    fn test_clear_audit_log_admin_blocked_by_default() {
         let bridge = test_bridge();
-        // Submit multiple tasks to accumulate audit events.
+        bridge.queue_submit("task1".into(), None, 0);
+        bridge.queue_submit("task2".into(), None, 0);
+        let before = bridge.list_audit_events(None).len();
+        assert!(before >= 2);
+        // Default policy: clearing is disabled.
+        let cleared = bridge.clear_audit_log_admin("auditor request".into());
+        assert!(!cleared);
+        let after = bridge.list_audit_events(None).len();
+        assert_eq!(after, before, "log must be unchanged when clear is disabled");
+    }
+
+    #[test]
+    fn test_clear_audit_log_admin_succeeds_when_policy_allows() {
+        let bridge = test_bridge();
+        bridge.config_set("audit-allow-clear".into(), "true".into());
         bridge.queue_submit("task1".into(), None, 0);
         bridge.queue_submit("task2".into(), None, 0);
         bridge.queue_submit("task3".into(), None, 0);
         let before = bridge.list_audit_events(None).len();
         assert!(before >= 3);
-        bridge.clear_audit_log();
-        // clear() logs an "AuditCleared" event and keeps only that one.
+        let cleared = bridge.clear_audit_log_admin("compliance officer initiated".into());
+        assert!(cleared);
         let after = bridge.list_audit_events(None).len();
-        assert_eq!(after, 1);
-        assert!(after < before);
+        assert_eq!(after, 1, "only the AuditCleared marker should remain");
+        let marker = &bridge.list_audit_events(None)[0];
+        assert!(marker.metadata_json.contains("compliance officer initiated"),
+            "marker metadata must carry the reason");
+    }
+
+    #[test]
+    fn test_audit_allow_clear_default_is_false() {
+        let bridge = test_bridge();
+        assert!(!bridge.audit_allow_clear());
+    }
+
+    #[test]
+    fn test_audit_retention_days_default_is_90() {
+        let bridge = test_bridge();
+        assert_eq!(bridge.audit_retention_days(), 90);
     }
 
     // ── Agent queue ──

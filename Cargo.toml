@@ -10,6 +10,8 @@ members = [
     "crates/thane-gtk",
     "crates/thane-cli",
     "crates/thane-bridge",
+    "crates/thane-daemon",
+    "crates/thane-audit-sink",
 ]
 resolver = "2"
 
@@ -31,6 +33,8 @@ thane-terminal = { path = "crates/thane-terminal" }
 thane-browser = { path = "crates/thane-browser" }
 thane-gtk = { path = "crates/thane-gtk" }
 thane-bridge = { path = "crates/thane-bridge" }
+thane-daemon = { path = "crates/thane-daemon" }
+thane-audit-sink = { path = "crates/thane-audit-sink" }
 
 # GTK ecosystem
 gtk4 = { version = "0.10", features = ["v4_12"] }
@@ -57,6 +61,8 @@ uniffi = "0.28"
 
 # Utilities
 base64 = "0.22"
+hex = "0.4"
+regex = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }

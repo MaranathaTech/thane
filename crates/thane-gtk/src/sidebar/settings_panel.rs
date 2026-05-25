@@ -21,8 +21,33 @@ pub struct SettingsPanel {
     link_url_in_app_switch: gtk4::Switch,
     link_url_in_browser_switch: gtk4::Switch,
     sensitive_policy_dropdown: gtk4::DropDown,
+    audit_redaction_dropdown: gtk4::DropDown,
     audit_code_sessions_switch: gtk4::Switch,
     audit_app_chats_switch: gtk4::Switch,
+    // Phase 5: external audit sinks (each block shares the same row layout).
+    audit_sink_syslog_enable: gtk4::Switch,
+    audit_sink_syslog_host_entry: gtk4::Entry,
+    audit_sink_syslog_severity: gtk4::DropDown,
+    audit_sink_syslog_test_btn: gtk4::Button,
+    audit_sink_webhook_enable: gtk4::Switch,
+    audit_sink_webhook_url_entry: gtk4::Entry,
+    audit_sink_webhook_severity: gtk4::DropDown,
+    audit_sink_webhook_test_btn: gtk4::Button,
+    // Phase 6: enterprise sinks. Primary fields only; full config lives in
+    // ~/.config/thane/config — power-user keys are documented in
+    // dist/public/AUDIT_LOG.md.
+    audit_sink_s3_enable: gtk4::Switch,
+    audit_sink_s3_bucket_entry: gtk4::Entry,
+    audit_sink_s3_severity: gtk4::DropDown,
+    audit_sink_s3_test_btn: gtk4::Button,
+    audit_sink_splunk_enable: gtk4::Switch,
+    audit_sink_splunk_url_entry: gtk4::Entry,
+    audit_sink_splunk_severity: gtk4::DropDown,
+    audit_sink_splunk_test_btn: gtk4::Button,
+    audit_sink_datadog_enable: gtk4::Switch,
+    audit_sink_datadog_region_dropdown: gtk4::DropDown,
+    audit_sink_datadog_severity: gtk4::DropDown,
+    audit_sink_datadog_test_btn: gtk4::Button,
     queue_mode_dropdown: gtk4::DropDown,
     queue_sandbox_dropdown: gtk4::DropDown,
     queue_schedule_entry: gtk4::Entry,
@@ -32,6 +57,9 @@ pub struct SettingsPanel {
     enterprise_cost_row: gtk4::Box,
     cost_scope_dropdown: gtk4::DropDown,
     close_btn: gtk4::Button,
+    /// Phase 6b: enterprise-policy banner shown at the top of the panel.
+    /// Hidden by default; toggled on by [`SettingsPanel::apply_enterprise_locks`].
+    policy_banner: gtk4::Label,
     /// Guard: suppress callbacks during programmatic updates.
     updating: Rc<Cell<bool>>,
 }
@@ -67,6 +95,18 @@ impl SettingsPanel {
         header.append(&close_btn);
 
         container.append(&header);
+
+        // Phase 6b: enterprise-policy banner. Hidden until the bridge tells
+        // us a policy is active. Same widget as the audit panel uses.
+        let policy_banner = gtk4::Label::new(None);
+        policy_banner.add_css_class("audit-policy-banner");
+        policy_banner.set_wrap(true);
+        policy_banner.set_xalign(0.0);
+        policy_banner.set_margin_start(12);
+        policy_banner.set_margin_end(12);
+        policy_banner.set_margin_bottom(4);
+        policy_banner.set_visible(false);
+        container.append(&policy_banner);
 
         let sep = gtk4::Separator::new(gtk4::Orientation::Horizontal);
         container.append(&sep);
@@ -292,6 +332,38 @@ impl SettingsPanel {
 
         content.append(&policy_row);
 
+        // Audit redaction policy dropdown.
+        let redaction_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let redaction_lbl = gtk4::Label::new(Some("Audit Redaction Policy"));
+        redaction_lbl.set_hexpand(true);
+        redaction_lbl.set_halign(gtk4::Align::Start);
+        redaction_row.append(&redaction_lbl);
+
+        let redaction_policies = gtk4::StringList::new(&[
+            "None — store events verbatim (NOT RECOMMENDED)",
+            "Redact — scrub detected secrets and PII (recommended)",
+            "Strict — additionally strip free-form fields",
+        ]);
+        let audit_redaction_dropdown =
+            gtk4::DropDown::new(Some(redaction_policies), gtk4::Expression::NONE);
+        audit_redaction_dropdown.set_selected(1); // Redact default
+        audit_redaction_dropdown
+            .set_tooltip_text(Some(
+                "Controls how audit events are scrubbed before being written to disk.",
+            ));
+        redaction_row.append(&audit_redaction_dropdown);
+
+        content.append(&redaction_row);
+
+        let redaction_hint = gtk4::Label::new(Some(
+            "Redacted events still chain and verify — the HMAC is computed over the redacted form.",
+        ));
+        redaction_hint.add_css_class("dim-label");
+        redaction_hint.set_halign(gtk4::Align::Start);
+        redaction_hint.set_margin_start(4);
+        redaction_hint.set_wrap(true);
+        content.append(&redaction_hint);
+
         // Audit Claude Code sessions switch.
         let audit_code_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
         let audit_code_lbl = gtk4::Label::new(Some("Audit Claude Code Sessions"));
@@ -324,6 +396,209 @@ impl SettingsPanel {
         audit_hint.set_margin_start(4);
         audit_hint.set_wrap(true);
         content.append(&audit_hint);
+
+        // ── Audit Sinks (Phase 5) ──
+        //
+        // External shipping of audit events. Each sink has an enable toggle,
+        // host/URL field, a minimum severity selector, and a Test button that
+        // fires a synthetic Info event so the operator can verify connectivity
+        // without waiting for real activity.
+        let sinks_sep = gtk4::Separator::new(gtk4::Orientation::Horizontal);
+        sinks_sep.set_margin_top(8);
+        content.append(&sinks_sep);
+
+        let sinks_title = gtk4::Label::new(Some("Audit Sinks"));
+        sinks_title.add_css_class("settings-section-title");
+        sinks_title.set_halign(gtk4::Align::Start);
+        content.append(&sinks_title);
+
+        // Syslog block.
+        let syslog_enable_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let syslog_enable_lbl = gtk4::Label::new(Some("Ship to syslog (TCP/TLS)"));
+        syslog_enable_lbl.set_hexpand(true);
+        syslog_enable_lbl.set_halign(gtk4::Align::Start);
+        syslog_enable_row.append(&syslog_enable_lbl);
+        let audit_sink_syslog_enable = gtk4::Switch::new();
+        audit_sink_syslog_enable.set_valign(gtk4::Align::Center);
+        syslog_enable_row.append(&audit_sink_syslog_enable);
+        content.append(&syslog_enable_row);
+
+        let audit_sink_syslog_host_entry = gtk4::Entry::new();
+        audit_sink_syslog_host_entry.set_placeholder_text(Some("Host (e.g. logs.example.com:6514)"));
+        content.append(&audit_sink_syslog_host_entry);
+
+        let syslog_sev_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let syslog_sev_lbl = gtk4::Label::new(Some("Min Severity"));
+        syslog_sev_lbl.set_hexpand(true);
+        syslog_sev_lbl.set_halign(gtk4::Align::Start);
+        syslog_sev_row.append(&syslog_sev_lbl);
+        let severities_syslog = gtk4::StringList::new(&["Info", "Warning", "Alert", "Critical"]);
+        let audit_sink_syslog_severity =
+            gtk4::DropDown::new(Some(severities_syslog), gtk4::Expression::NONE);
+        syslog_sev_row.append(&audit_sink_syslog_severity);
+        content.append(&syslog_sev_row);
+
+        let audit_sink_syslog_test_btn = gtk4::Button::with_label("Send test event");
+        audit_sink_syslog_test_btn.set_halign(gtk4::Align::Start);
+        audit_sink_syslog_test_btn.set_tooltip_text(Some(
+            "Fire a synthetic Info-severity audit event to verify syslog delivery.",
+        ));
+        content.append(&audit_sink_syslog_test_btn);
+
+        // Webhook block.
+        let webhook_enable_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let webhook_enable_lbl = gtk4::Label::new(Some("Ship to webhook (HMAC-signed)"));
+        webhook_enable_lbl.set_hexpand(true);
+        webhook_enable_lbl.set_halign(gtk4::Align::Start);
+        webhook_enable_row.append(&webhook_enable_lbl);
+        let audit_sink_webhook_enable = gtk4::Switch::new();
+        audit_sink_webhook_enable.set_valign(gtk4::Align::Center);
+        webhook_enable_row.append(&audit_sink_webhook_enable);
+        content.append(&webhook_enable_row);
+
+        let audit_sink_webhook_url_entry = gtk4::Entry::new();
+        audit_sink_webhook_url_entry.set_placeholder_text(Some("URL (e.g. https://siem.example.com/ingest)"));
+        content.append(&audit_sink_webhook_url_entry);
+
+        let webhook_sev_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let webhook_sev_lbl = gtk4::Label::new(Some("Min Severity"));
+        webhook_sev_lbl.set_hexpand(true);
+        webhook_sev_lbl.set_halign(gtk4::Align::Start);
+        webhook_sev_row.append(&webhook_sev_lbl);
+        let severities_webhook = gtk4::StringList::new(&["Info", "Warning", "Alert", "Critical"]);
+        let audit_sink_webhook_severity =
+            gtk4::DropDown::new(Some(severities_webhook), gtk4::Expression::NONE);
+        webhook_sev_row.append(&audit_sink_webhook_severity);
+        content.append(&webhook_sev_row);
+
+        let audit_sink_webhook_test_btn = gtk4::Button::with_label("Send test event");
+        audit_sink_webhook_test_btn.set_halign(gtk4::Align::Start);
+        audit_sink_webhook_test_btn.set_tooltip_text(Some(
+            "Fire a synthetic Info-severity audit event to verify webhook delivery.",
+        ));
+        content.append(&audit_sink_webhook_test_btn);
+
+        // S3 block (Phase 6). Only the bucket field is surfaced here; region,
+        // prefix, SSE mode, and Object Lock live in the config file.
+        let s3_enable_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let s3_enable_lbl = gtk4::Label::new(Some("Ship to S3 (gzip JSONL)"));
+        s3_enable_lbl.set_hexpand(true);
+        s3_enable_lbl.set_halign(gtk4::Align::Start);
+        s3_enable_row.append(&s3_enable_lbl);
+        let audit_sink_s3_enable = gtk4::Switch::new();
+        audit_sink_s3_enable.set_valign(gtk4::Align::Center);
+        s3_enable_row.append(&audit_sink_s3_enable);
+        content.append(&s3_enable_row);
+
+        let audit_sink_s3_bucket_entry = gtk4::Entry::new();
+        audit_sink_s3_bucket_entry.set_placeholder_text(Some("Bucket (e.g. my-org-audit-logs)"));
+        content.append(&audit_sink_s3_bucket_entry);
+
+        let s3_sev_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let s3_sev_lbl = gtk4::Label::new(Some("Min Severity"));
+        s3_sev_lbl.set_hexpand(true);
+        s3_sev_lbl.set_halign(gtk4::Align::Start);
+        s3_sev_row.append(&s3_sev_lbl);
+        let severities_s3 = gtk4::StringList::new(&["Info", "Warning", "Alert", "Critical"]);
+        let audit_sink_s3_severity =
+            gtk4::DropDown::new(Some(severities_s3), gtk4::Expression::NONE);
+        s3_sev_row.append(&audit_sink_s3_severity);
+        content.append(&s3_sev_row);
+
+        let audit_sink_s3_test_btn = gtk4::Button::with_label("Send test event");
+        audit_sink_s3_test_btn.set_halign(gtk4::Align::Start);
+        audit_sink_s3_test_btn.set_tooltip_text(Some(
+            "Fire a synthetic Info-severity audit event to verify S3 delivery.",
+        ));
+        content.append(&audit_sink_s3_test_btn);
+
+        // Splunk HEC block (Phase 6).
+        let splunk_enable_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let splunk_enable_lbl = gtk4::Label::new(Some("Ship to Splunk HEC"));
+        splunk_enable_lbl.set_hexpand(true);
+        splunk_enable_lbl.set_halign(gtk4::Align::Start);
+        splunk_enable_row.append(&splunk_enable_lbl);
+        let audit_sink_splunk_enable = gtk4::Switch::new();
+        audit_sink_splunk_enable.set_valign(gtk4::Align::Center);
+        splunk_enable_row.append(&audit_sink_splunk_enable);
+        content.append(&splunk_enable_row);
+
+        let audit_sink_splunk_url_entry = gtk4::Entry::new();
+        audit_sink_splunk_url_entry.set_placeholder_text(Some(
+            "URL (e.g. https://splunk.example.com:8088/services/collector/event)",
+        ));
+        content.append(&audit_sink_splunk_url_entry);
+
+        let splunk_sev_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let splunk_sev_lbl = gtk4::Label::new(Some("Min Severity"));
+        splunk_sev_lbl.set_hexpand(true);
+        splunk_sev_lbl.set_halign(gtk4::Align::Start);
+        splunk_sev_row.append(&splunk_sev_lbl);
+        let severities_splunk = gtk4::StringList::new(&["Info", "Warning", "Alert", "Critical"]);
+        let audit_sink_splunk_severity =
+            gtk4::DropDown::new(Some(severities_splunk), gtk4::Expression::NONE);
+        splunk_sev_row.append(&audit_sink_splunk_severity);
+        content.append(&splunk_sev_row);
+
+        let audit_sink_splunk_test_btn = gtk4::Button::with_label("Send test event");
+        audit_sink_splunk_test_btn.set_halign(gtk4::Align::Start);
+        audit_sink_splunk_test_btn.set_tooltip_text(Some(
+            "Fire a synthetic Info-severity audit event to verify Splunk HEC delivery.",
+        ));
+        content.append(&audit_sink_splunk_test_btn);
+
+        // Datadog Logs block (Phase 6). Region is a dropdown because it's a
+        // small closed set — wrong region = wrong tenant.
+        let datadog_enable_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let datadog_enable_lbl = gtk4::Label::new(Some("Ship to Datadog Logs"));
+        datadog_enable_lbl.set_hexpand(true);
+        datadog_enable_lbl.set_halign(gtk4::Align::Start);
+        datadog_enable_row.append(&datadog_enable_lbl);
+        let audit_sink_datadog_enable = gtk4::Switch::new();
+        audit_sink_datadog_enable.set_valign(gtk4::Align::Center);
+        datadog_enable_row.append(&audit_sink_datadog_enable);
+        content.append(&datadog_enable_row);
+
+        let dd_region_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let dd_region_lbl = gtk4::Label::new(Some("Region"));
+        dd_region_lbl.set_hexpand(true);
+        dd_region_lbl.set_halign(gtk4::Align::Start);
+        dd_region_row.append(&dd_region_lbl);
+        let dd_regions = gtk4::StringList::new(&["us", "us3", "us5", "eu", "ap1"]);
+        let audit_sink_datadog_region_dropdown =
+            gtk4::DropDown::new(Some(dd_regions), gtk4::Expression::NONE);
+        dd_region_row.append(&audit_sink_datadog_region_dropdown);
+        content.append(&dd_region_row);
+
+        let datadog_sev_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let datadog_sev_lbl = gtk4::Label::new(Some("Min Severity"));
+        datadog_sev_lbl.set_hexpand(true);
+        datadog_sev_lbl.set_halign(gtk4::Align::Start);
+        datadog_sev_row.append(&datadog_sev_lbl);
+        let severities_datadog = gtk4::StringList::new(&["Info", "Warning", "Alert", "Critical"]);
+        let audit_sink_datadog_severity =
+            gtk4::DropDown::new(Some(severities_datadog), gtk4::Expression::NONE);
+        datadog_sev_row.append(&audit_sink_datadog_severity);
+        content.append(&datadog_sev_row);
+
+        let audit_sink_datadog_test_btn = gtk4::Button::with_label("Send test event");
+        audit_sink_datadog_test_btn.set_halign(gtk4::Align::Start);
+        audit_sink_datadog_test_btn.set_tooltip_text(Some(
+            "Fire a synthetic Info-severity audit event to verify Datadog delivery.",
+        ));
+        content.append(&audit_sink_datadog_test_btn);
+
+        let sinks_hint = gtk4::Label::new(Some(
+            "Secrets (HMAC, HEC token, Datadog API key, S3 creds) live in the platform \
+             secret store under the configured ID. Full per-sink options live in \
+             ~/.config/thane/config — see dist/public/AUDIT_LOG.md. Restart thane for \
+             sink-config changes to take effect.",
+        ));
+        sinks_hint.add_css_class("dim-label");
+        sinks_hint.set_halign(gtk4::Align::Start);
+        sinks_hint.set_margin_start(4);
+        sinks_hint.set_wrap(true);
+        content.append(&sinks_hint);
 
         // ── Agent Queue section ──
         let queue_sep = gtk4::Separator::new(gtk4::Orientation::Horizontal);
@@ -487,8 +762,29 @@ impl SettingsPanel {
             link_url_in_app_switch,
             link_url_in_browser_switch,
             sensitive_policy_dropdown,
+            audit_redaction_dropdown,
             audit_code_sessions_switch,
             audit_app_chats_switch,
+            audit_sink_syslog_enable,
+            audit_sink_syslog_host_entry,
+            audit_sink_syslog_severity,
+            audit_sink_syslog_test_btn,
+            audit_sink_webhook_enable,
+            audit_sink_webhook_url_entry,
+            audit_sink_webhook_severity,
+            audit_sink_webhook_test_btn,
+            audit_sink_s3_enable,
+            audit_sink_s3_bucket_entry,
+            audit_sink_s3_severity,
+            audit_sink_s3_test_btn,
+            audit_sink_splunk_enable,
+            audit_sink_splunk_url_entry,
+            audit_sink_splunk_severity,
+            audit_sink_splunk_test_btn,
+            audit_sink_datadog_enable,
+            audit_sink_datadog_region_dropdown,
+            audit_sink_datadog_severity,
+            audit_sink_datadog_test_btn,
             queue_mode_dropdown,
             queue_sandbox_dropdown,
             queue_schedule_entry,
@@ -498,8 +794,67 @@ impl SettingsPanel {
             enterprise_cost_row,
             cost_scope_dropdown,
             close_btn,
+            policy_banner,
             updating: Rc::new(Cell::new(false)),
         }
+    }
+
+    /// Apply enterprise-policy lock indicators across the settings panel.
+    ///
+    /// For every audit-related config key the policy locks, the corresponding
+    /// control is rendered insensitive with a tooltip naming the issuer so
+    /// the user understands why they can't change it. The persistent banner
+    /// at the top of the panel is shown with the policy's `ui_banner` (or a
+    /// generated fallback). When the config has no active policy this is a
+    /// no-op — all controls remain sensitive.
+    pub fn apply_enterprise_locks(&self, config: &thane_core::config::Config) {
+        let Some(policy) = config.policy() else {
+            self.policy_banner.set_visible(false);
+            return;
+        };
+        let issuer = if policy.issued_by.is_empty() {
+            "your organization".to_string()
+        } else {
+            policy.issued_by.clone()
+        };
+        let banner = policy.ui_banner.clone().unwrap_or_else(|| {
+            format!(
+                "Enterprise audit policy active — issued by {issuer}. \
+                 Locked settings cannot be changed from this panel."
+            )
+        });
+        self.policy_banner.set_text(&banner);
+        self.policy_banner.set_visible(true);
+
+        // Per-key lock applicator. Listed here rather than dotted through
+        // dozens of accessors so future locked-key additions only need to
+        // extend this match.
+        let lock = |key: &str, widget: &gtk4::Widget| {
+            if config.is_locked(key) {
+                widget.set_sensitive(false);
+                widget.set_tooltip_text(Some(&format!(
+                    "Locked by enterprise policy issued by {issuer} (key: {key}). \
+                     Removing this lock requires `thane-cli enterprise leave` \
+                     with sudo."
+                )));
+            }
+        };
+        lock("audit-redaction-policy", self.audit_redaction_dropdown.upcast_ref());
+        lock("audit-claude-code-sessions", self.audit_code_sessions_switch.upcast_ref());
+        lock("audit-claude-app-chats", self.audit_app_chats_switch.upcast_ref());
+        lock("audit-sink-syslog-enabled", self.audit_sink_syslog_enable.upcast_ref());
+        lock("audit-sink-syslog-host", self.audit_sink_syslog_host_entry.upcast_ref());
+        lock("audit-sink-syslog-min-severity", self.audit_sink_syslog_severity.upcast_ref());
+        lock("audit-sink-webhook-enabled", self.audit_sink_webhook_enable.upcast_ref());
+        lock("audit-sink-webhook-url", self.audit_sink_webhook_url_entry.upcast_ref());
+        lock("audit-sink-webhook-min-severity", self.audit_sink_webhook_severity.upcast_ref());
+        lock("audit-sink-s3-enabled", self.audit_sink_s3_enable.upcast_ref());
+        lock("audit-sink-s3-bucket", self.audit_sink_s3_bucket_entry.upcast_ref());
+        lock("audit-sink-s3-min-severity", self.audit_sink_s3_severity.upcast_ref());
+        lock("audit-sink-splunk-enabled", self.audit_sink_splunk_enable.upcast_ref());
+        lock("audit-sink-splunk-url", self.audit_sink_splunk_url_entry.upcast_ref());
+        lock("audit-sink-splunk-min-severity", self.audit_sink_splunk_severity.upcast_ref());
+        lock("audit-sink-datadog-enabled", self.audit_sink_datadog_enable.upcast_ref());
     }
 
     pub fn widget(&self) -> &gtk4::Box {
@@ -619,6 +974,18 @@ impl SettingsPanel {
     pub fn set_audit_code_sessions(&self, enabled: bool) {
         self.updating.set(true);
         self.audit_code_sessions_switch.set_active(enabled);
+        self.updating.set(false);
+    }
+
+    /// Set audit redaction policy: "none" → 0, "redact" → 1, "strict" → 2.
+    pub fn set_audit_redaction_policy(&self, policy: &str) {
+        self.updating.set(true);
+        let idx = match policy.to_lowercase().as_str() {
+            "none" => 0,
+            "strict" => 2,
+            _ => 1, // redact (default)
+        };
+        self.audit_redaction_dropdown.set_selected(idx);
         self.updating.set(false);
     }
 
@@ -754,6 +1121,16 @@ impl SettingsPanel {
     pub fn connect_sensitive_policy_changed<F: Fn(u32) + 'static>(&self, f: F) {
         let guard = self.updating.clone();
         self.sensitive_policy_dropdown
+            .connect_selected_notify(move |dd| {
+                if guard.get() { return; }
+                f(dd.selected());
+            });
+    }
+
+    /// Connect callback for audit redaction policy changes (index: 0=None, 1=Redact, 2=Strict).
+    pub fn connect_audit_redaction_policy_changed<F: Fn(u32) + 'static>(&self, f: F) {
+        let guard = self.updating.clone();
+        self.audit_redaction_dropdown
             .connect_selected_notify(move |dd| {
                 if guard.get() { return; }
                 f(dd.selected());
@@ -902,6 +1279,272 @@ impl SettingsPanel {
     /// Connect the close button callback.
     pub fn connect_close<F: Fn() + 'static>(&self, f: F) {
         self.close_btn.connect_clicked(move |_| f());
+    }
+
+    // ── Phase 5: Audit Sinks setters & callbacks ────────────────────────────
+
+    pub fn set_audit_sink_syslog_enabled(&self, enabled: bool) {
+        self.updating.set(true);
+        self.audit_sink_syslog_enable.set_active(enabled);
+        self.updating.set(false);
+    }
+
+    pub fn set_audit_sink_syslog_host(&self, host: &str) {
+        self.updating.set(true);
+        self.audit_sink_syslog_host_entry.set_text(host);
+        self.updating.set(false);
+    }
+
+    pub fn set_audit_sink_syslog_min_severity(&self, severity: &str) {
+        self.updating.set(true);
+        self.audit_sink_syslog_severity.set_selected(severity_to_index(severity));
+        self.updating.set(false);
+    }
+
+    pub fn set_audit_sink_webhook_enabled(&self, enabled: bool) {
+        self.updating.set(true);
+        self.audit_sink_webhook_enable.set_active(enabled);
+        self.updating.set(false);
+    }
+
+    pub fn set_audit_sink_webhook_url(&self, url: &str) {
+        self.updating.set(true);
+        self.audit_sink_webhook_url_entry.set_text(url);
+        self.updating.set(false);
+    }
+
+    pub fn set_audit_sink_webhook_min_severity(&self, severity: &str) {
+        self.updating.set(true);
+        self.audit_sink_webhook_severity.set_selected(severity_to_index(severity));
+        self.updating.set(false);
+    }
+
+    pub fn connect_audit_sink_syslog_enabled<F: Fn(bool) + 'static>(&self, f: F) {
+        let guard = self.updating.clone();
+        self.audit_sink_syslog_enable.connect_state_set(move |_, on| {
+            if !guard.get() { f(on); }
+            gtk4::glib::Propagation::Proceed
+        });
+    }
+
+    pub fn connect_audit_sink_syslog_host<F: Fn(&str) + 'static>(&self, f: F) {
+        let guard = self.updating.clone();
+        self.audit_sink_syslog_host_entry.connect_activate(move |entry| {
+            if guard.get() { return; }
+            f(&entry.text());
+        });
+    }
+
+    pub fn connect_audit_sink_syslog_severity<F: Fn(&str) + 'static>(&self, f: F) {
+        let guard = self.updating.clone();
+        self.audit_sink_syslog_severity.connect_selected_notify(move |dd| {
+            if guard.get() { return; }
+            f(index_to_severity(dd.selected()));
+        });
+    }
+
+    pub fn connect_audit_sink_syslog_test<F: Fn() + 'static>(&self, f: F) {
+        self.audit_sink_syslog_test_btn.connect_clicked(move |_| f());
+    }
+
+    pub fn connect_audit_sink_webhook_enabled<F: Fn(bool) + 'static>(&self, f: F) {
+        let guard = self.updating.clone();
+        self.audit_sink_webhook_enable.connect_state_set(move |_, on| {
+            if !guard.get() { f(on); }
+            gtk4::glib::Propagation::Proceed
+        });
+    }
+
+    pub fn connect_audit_sink_webhook_url<F: Fn(&str) + 'static>(&self, f: F) {
+        let guard = self.updating.clone();
+        self.audit_sink_webhook_url_entry.connect_activate(move |entry| {
+            if guard.get() { return; }
+            f(&entry.text());
+        });
+    }
+
+    pub fn connect_audit_sink_webhook_severity<F: Fn(&str) + 'static>(&self, f: F) {
+        let guard = self.updating.clone();
+        self.audit_sink_webhook_severity.connect_selected_notify(move |dd| {
+            if guard.get() { return; }
+            f(index_to_severity(dd.selected()));
+        });
+    }
+
+    pub fn connect_audit_sink_webhook_test<F: Fn() + 'static>(&self, f: F) {
+        self.audit_sink_webhook_test_btn.connect_clicked(move |_| f());
+    }
+
+    // ── Phase 6: S3 / Splunk / Datadog setters & callbacks ──────────────────
+
+    pub fn set_audit_sink_s3_enabled(&self, enabled: bool) {
+        self.updating.set(true);
+        self.audit_sink_s3_enable.set_active(enabled);
+        self.updating.set(false);
+    }
+
+    pub fn set_audit_sink_s3_bucket(&self, bucket: &str) {
+        self.updating.set(true);
+        self.audit_sink_s3_bucket_entry.set_text(bucket);
+        self.updating.set(false);
+    }
+
+    pub fn set_audit_sink_s3_min_severity(&self, severity: &str) {
+        self.updating.set(true);
+        self.audit_sink_s3_severity.set_selected(severity_to_index(severity));
+        self.updating.set(false);
+    }
+
+    pub fn connect_audit_sink_s3_enabled<F: Fn(bool) + 'static>(&self, f: F) {
+        let guard = self.updating.clone();
+        self.audit_sink_s3_enable.connect_state_set(move |_, on| {
+            if !guard.get() { f(on); }
+            gtk4::glib::Propagation::Proceed
+        });
+    }
+
+    pub fn connect_audit_sink_s3_bucket<F: Fn(&str) + 'static>(&self, f: F) {
+        let guard = self.updating.clone();
+        self.audit_sink_s3_bucket_entry.connect_activate(move |entry| {
+            if guard.get() { return; }
+            f(&entry.text());
+        });
+    }
+
+    pub fn connect_audit_sink_s3_severity<F: Fn(&str) + 'static>(&self, f: F) {
+        let guard = self.updating.clone();
+        self.audit_sink_s3_severity.connect_selected_notify(move |dd| {
+            if guard.get() { return; }
+            f(index_to_severity(dd.selected()));
+        });
+    }
+
+    pub fn connect_audit_sink_s3_test<F: Fn() + 'static>(&self, f: F) {
+        self.audit_sink_s3_test_btn.connect_clicked(move |_| f());
+    }
+
+    pub fn set_audit_sink_splunk_enabled(&self, enabled: bool) {
+        self.updating.set(true);
+        self.audit_sink_splunk_enable.set_active(enabled);
+        self.updating.set(false);
+    }
+
+    pub fn set_audit_sink_splunk_url(&self, url: &str) {
+        self.updating.set(true);
+        self.audit_sink_splunk_url_entry.set_text(url);
+        self.updating.set(false);
+    }
+
+    pub fn set_audit_sink_splunk_min_severity(&self, severity: &str) {
+        self.updating.set(true);
+        self.audit_sink_splunk_severity.set_selected(severity_to_index(severity));
+        self.updating.set(false);
+    }
+
+    pub fn connect_audit_sink_splunk_enabled<F: Fn(bool) + 'static>(&self, f: F) {
+        let guard = self.updating.clone();
+        self.audit_sink_splunk_enable.connect_state_set(move |_, on| {
+            if !guard.get() { f(on); }
+            gtk4::glib::Propagation::Proceed
+        });
+    }
+
+    pub fn connect_audit_sink_splunk_url<F: Fn(&str) + 'static>(&self, f: F) {
+        let guard = self.updating.clone();
+        self.audit_sink_splunk_url_entry.connect_activate(move |entry| {
+            if guard.get() { return; }
+            f(&entry.text());
+        });
+    }
+
+    pub fn connect_audit_sink_splunk_severity<F: Fn(&str) + 'static>(&self, f: F) {
+        let guard = self.updating.clone();
+        self.audit_sink_splunk_severity.connect_selected_notify(move |dd| {
+            if guard.get() { return; }
+            f(index_to_severity(dd.selected()));
+        });
+    }
+
+    pub fn connect_audit_sink_splunk_test<F: Fn() + 'static>(&self, f: F) {
+        self.audit_sink_splunk_test_btn.connect_clicked(move |_| f());
+    }
+
+    pub fn set_audit_sink_datadog_enabled(&self, enabled: bool) {
+        self.updating.set(true);
+        self.audit_sink_datadog_enable.set_active(enabled);
+        self.updating.set(false);
+    }
+
+    pub fn set_audit_sink_datadog_region(&self, region: &str) {
+        self.updating.set(true);
+        let idx = match region.trim().to_ascii_lowercase().as_str() {
+            "us3" => 1,
+            "us5" => 2,
+            "eu" => 3,
+            "ap1" => 4,
+            _ => 0,
+        };
+        self.audit_sink_datadog_region_dropdown.set_selected(idx);
+        self.updating.set(false);
+    }
+
+    pub fn set_audit_sink_datadog_min_severity(&self, severity: &str) {
+        self.updating.set(true);
+        self.audit_sink_datadog_severity.set_selected(severity_to_index(severity));
+        self.updating.set(false);
+    }
+
+    pub fn connect_audit_sink_datadog_enabled<F: Fn(bool) + 'static>(&self, f: F) {
+        let guard = self.updating.clone();
+        self.audit_sink_datadog_enable.connect_state_set(move |_, on| {
+            if !guard.get() { f(on); }
+            gtk4::glib::Propagation::Proceed
+        });
+    }
+
+    pub fn connect_audit_sink_datadog_region<F: Fn(&str) + 'static>(&self, f: F) {
+        let guard = self.updating.clone();
+        self.audit_sink_datadog_region_dropdown.connect_selected_notify(move |dd| {
+            if guard.get() { return; }
+            let region = match dd.selected() {
+                1 => "us3",
+                2 => "us5",
+                3 => "eu",
+                4 => "ap1",
+                _ => "us",
+            };
+            f(region);
+        });
+    }
+
+    pub fn connect_audit_sink_datadog_severity<F: Fn(&str) + 'static>(&self, f: F) {
+        let guard = self.updating.clone();
+        self.audit_sink_datadog_severity.connect_selected_notify(move |dd| {
+            if guard.get() { return; }
+            f(index_to_severity(dd.selected()));
+        });
+    }
+
+    pub fn connect_audit_sink_datadog_test<F: Fn() + 'static>(&self, f: F) {
+        self.audit_sink_datadog_test_btn.connect_clicked(move |_| f());
+    }
+}
+
+fn severity_to_index(s: &str) -> u32 {
+    match s.to_ascii_lowercase().as_str() {
+        "warning" | "warn" => 1,
+        "alert" => 2,
+        "critical" | "crit" => 3,
+        _ => 0,
+    }
+}
+
+fn index_to_severity(idx: u32) -> &'static str {
+    match idx {
+        1 => "warning",
+        2 => "alert",
+        3 => "critical",
+        _ => "info",
     }
 }
 

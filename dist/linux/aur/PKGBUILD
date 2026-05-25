@@ -43,6 +43,7 @@ package() {
     # Binaries
     install -Dm755 "target/release/thane" "$pkgdir/usr/bin/thane"
     install -Dm755 "target/release/thane-cli" "$pkgdir/usr/bin/thane-cli"
+    install -Dm755 "target/release/thane-daemon" "$pkgdir/usr/bin/thane-daemon"
 
     # Desktop file
     install -Dm644 "data/com.thane.app.desktop" \
@@ -67,6 +68,10 @@ package() {
     # systemd user service
     install -Dm644 "data/thane.service" \
         "$pkgdir/usr/lib/systemd/user/thane.service"
+
+    # thane-daemon systemd user service (auto-start the queue at login)
+    install -Dm644 "dist/linux/systemd/thane-daemon.service" \
+        "$pkgdir/usr/lib/systemd/user/thane-daemon.service"
 
     # License
     install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

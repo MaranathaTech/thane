@@ -18,7 +18,7 @@ AI coding agents need more than a plain terminal. thane gives them — and you �
 - **JSON-RPC socket API** — full programmatic control for AI agents
 - **Session persistence** — pick up where you left off across restarts
 - **Notifications** with desktop integration and per-workspace history
-- **Audit log** — track security events with severity filtering
+- **Audit log** — track security events with severity filtering; ship to syslog, S3, Splunk HEC, Datadog Logs, Grafana Loki, or any webhook (see [AUDIT_LOG.md](AUDIT_LOG.md) and [COMPLIANCE.md](COMPLIANCE.md))
 - **Git diff viewer** — inline diffs per pane, no context switching
 - **Ghostty-compatible config** format
 - **Leader key mode** (tmux-style `Ctrl+B` prefix)
@@ -53,6 +53,7 @@ cargo build --release
 # Install
 sudo install -Dm755 target/release/thane /usr/local/bin/thane
 sudo install -Dm755 target/release/thane-cli /usr/local/bin/thane-cli
+sudo install -Dm755 target/release/thane-daemon /usr/local/bin/thane-daemon
 ```
 
 ### macOS
@@ -82,6 +83,29 @@ thane-cli workspace create --title "My Project" --cwd ~/projects/myapp
 thane-cli surface split-right
 thane-cli browser open https://localhost:3000
 ```
+
+### Background daemon — queue without the GUI
+
+The `thane-daemon` process owns the IPC socket and runs the agent queue. Once
+installed it starts at every login, so `thane-cli queue submit ...` works
+immediately and queued tasks execute whether or not the GUI is open.
+
+```bash
+# macOS — installs ~/Library/LaunchAgents/com.thane.daemon.plist
+thane-daemon install-launch-agent
+
+# Linux — installs ~/.config/systemd/user/thane-daemon.service
+thane-daemon install-user-service
+
+# Health check / lifecycle
+thane-cli status              # daemon_running, daemon_pid, socket_path, uptime_secs
+thane-cli daemon start        # spawn in the background if not already running
+thane-cli daemon restart      # SIGTERM existing, then spawn fresh
+```
+
+The GUI app auto-installs the LaunchAgent on first launch (set
+`daemon-start-at-login = false` in your config to opt out) and steps aside
+when an external daemon is already serving the socket.
 
 ## Configuration
 
@@ -128,6 +152,7 @@ crates/
 ├── thane-browser    # Browser surface trait + WebKit backend
 ├── thane-gtk        # Linux frontend (GTK4 + VTE + WebKitGTK)
 ├── thane-cli        # CLI client
+├── thane-daemon     # Headless background daemon (IPC + queue executor)
 └── thane-bridge     # macOS FFI bridge (UniFFI → Swift)
 
 frontends/
@@ -151,6 +176,32 @@ frontends/
 | `F1` | Help (full shortcut reference) |
 
 See the in-app Help panel (`F1`) for the complete list.
+
+## Enterprise
+
+For teams with SOC 2 / ISO 27001 / HIPAA / PCI / NIST 800-53 audit requirements,
+thane ships a full audit pipeline out of the box:
+
+- **27 event types** covering shell, file, network, browser, sandbox, queue,
+  and agent activity
+- **Per-event HMAC-SHA256 + tamper-evident hash chain** — events cannot be
+  silently edited
+- **AES-256-GCM encryption at rest** for rotated segments
+- **Configurable redaction** of secrets, tokens, and PII before signing
+- **External delivery** to syslog, S3 (with Object Lock), Splunk HEC, Datadog
+  Logs, or any HTTPS webhook
+- **Offline verification** for auditors with `thane-cli audit verify`
+
+For details:
+- [AUDIT_LOG.md](AUDIT_LOG.md) — event schema, redaction modes, per-sink
+  configuration, operator runbook
+- [COMPLIANCE.md](COMPLIANCE.md) — control mapping for SOC 2, ISO 27001,
+  HIPAA, PCI-DSS v4, NIST 800-53 Rev. 5
+- [ENTERPRISE.md](ENTERPRISE.md) — admin / MDM deployment guide,
+  enterprise policy file, daemon-at-login operational guide,
+  decommissioning playbook
+- [API.md](API.md) — JSON-RPC method reference (51 methods)
+- [CHANGELOG.md](../../CHANGELOG.md) — release history
 
 ## Contributing
 

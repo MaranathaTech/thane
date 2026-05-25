@@ -1,5 +1,7 @@
 pub mod audit;
 pub mod browser;
+pub mod daemon;
+pub mod enterprise;
 pub mod notification;
 pub mod queue;
 pub mod sandbox;

@@ -19,10 +19,15 @@ cask "thane" do
   app "thane.app"
 
   binary "#{appdir}/thane.app/Contents/MacOS/thane-cli", target: "thane-cli"
+  binary "#{appdir}/thane.app/Contents/MacOS/thane-daemon", target: "thane-daemon"
+
+  uninstall launchctl: "com.thane.daemon"
 
   zap trash: [
     "~/Library/Application Support/thane",
     "~/Library/Caches/thane",
+    "~/Library/Logs/thane",
+    "~/Library/LaunchAgents/com.thane.daemon.plist",
     "~/Library/Preferences/com.thane.app.plist",
   ]
 end

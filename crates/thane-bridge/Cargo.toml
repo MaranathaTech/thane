@@ -17,6 +17,7 @@ thane-rpc.workspace = true
 thane-persist.workspace = true
 thane-platform.workspace = true
 thane-ipc.workspace = true
+thane-audit-sink = { workspace = true, features = ["loki"] }
 uuid.workspace = true
 chrono.workspace = true
 serde.workspace = true

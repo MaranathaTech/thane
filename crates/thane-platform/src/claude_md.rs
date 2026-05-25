@@ -1,11 +1,11 @@
 use std::io;
 use std::path::PathBuf;
 
-const OLD_MARKER: &str = "<!-- thane-agent-queue-instructions-v3 -->";
-const MARKER: &str = "<!-- thane-agent-queue-instructions-v4 -->";
+const OLD_MARKER: &str = "<!-- thane-agent-queue-instructions-v4 -->";
+const MARKER: &str = "<!-- thane-agent-queue-instructions-v5 -->";
 
 const THANE_INSTRUCTIONS: &str = r#"
-<!-- thane-agent-queue-instructions-v4 -->
+<!-- thane-agent-queue-instructions-v5 -->
 ## thane Agent Queue Integration
 
 When running inside a thane terminal workspace, you have access to the thane agent queue. The `$THANE_SOCKET_PATH` environment variable is automatically set in all thane terminal sessions.
@@ -40,49 +40,48 @@ Each queued task runs as an **independent, headless Claude Code session** with n
 
 ### Submitting multi-phase plans
 
-When the user asks you to queue a plan with multiple phases, **submit each phase as a separate task** rather than one monolithic task. Each phase should depend on the successful completion of the previous phase.
+When the user asks you to queue a plan with multiple phases, **submit each phase as a separate, independent task** rather than one monolithic task. Do NOT chain phases with `--depends-on` by default.
 
-- Use `thane-cli queue submit --depends-on <previous-task-id>` to chain phases together
-- The dependent task will only execute after its dependency completes successfully
-- If a phase fails, subsequent dependent phases will not run
-
-Example workflow for a 3-phase plan:
+Each queued task already runs as an independent Claude Code session. Submitting phases independently lets them be retried, re-ordered, or run in parallel without one failure blocking the rest of the plan.
 
 ```bash
-# Phase 1
+# Default: each phase is its own independent task — no chaining.
 cat <<'TASK' > /tmp/thane-phase1.md
 ## Phase 1: <title>
 Working directory: /path/to/project
 ...detailed instructions...
 TASK
-PHASE1_ID=$(thane-cli queue submit /tmp/thane-phase1.md)
+thane-cli queue submit /tmp/thane-phase1.md
 
-# Phase 2 — depends on Phase 1
 cat <<'TASK' > /tmp/thane-phase2.md
 ## Phase 2: <title>
 Working directory: /path/to/project
-Depends on: Phase 1 — <brief description of what Phase 1 does>
+Depends on (for the human/agent picking this up): Phase 1 must already be merged.
 ...detailed instructions...
 TASK
-PHASE2_ID=$(thane-cli queue submit --depends-on "$PHASE1_ID" /tmp/thane-phase2.md)
-
-# Phase 3 — depends on Phase 2
-cat <<'TASK' > /tmp/thane-phase3.md
-## Phase 3: <title>
-Working directory: /path/to/project
-Depends on: Phase 2 — <brief description of what Phase 2 does>
-...detailed instructions...
-TASK
-thane-cli queue submit --depends-on "$PHASE2_ID" /tmp/thane-phase3.md
+thane-cli queue submit /tmp/thane-phase2.md
 ```
+
+If a phase's MARKDOWN says "Depends on Phase N", that's guidance for the developer or agent picking up the task — it tells them what state the codebase needs to be in. The queue itself does not need to enforce that ordering.
+
+### Chaining with `--depends-on` (opt-in only)
+
+If the user explicitly asks for queue-enforced ordering — e.g. "make sure each phase only runs after the previous one finishes" — pass `--depends-on`:
+
+```bash
+PHASE1_ID=$(thane-cli queue submit /tmp/thane-phase1.md | jq -r '.id')
+thane-cli queue submit --depends-on "$PHASE1_ID" /tmp/thane-phase2.md
+```
+
+Treat dependency chaining as an OPTION available when requested, not the default behavior.
 
 ### Guidelines
 
 - Only submit to the queue when the user explicitly asks (e.g., "add this plan to my thane queue", "add to the queue", "run this later")
 - Write each task as if handing it to a developer who has never seen the codebase — include all necessary context
 - Each queued task runs as an independent Claude Code session with no access to your current conversation
-- For multi-phase plans, always submit phases independently with dependency chaining rather than as a single task
-- Include in each dependent phase a brief description of what the prior phase was supposed to accomplish, so the agent can verify prerequisites
+- For multi-phase plans, default to independent phase submission; only use `--depends-on` when the user explicitly requests chained execution
+- When phases have logical prerequisites, describe them in the phase markdown body so the implementer knows the merge order
 "#;
 
 /// Returns the path to `~/.claude/CLAUDE.md`.
@@ -221,7 +220,7 @@ mod tests {
     #[test]
     fn test_instructions_contain_versioned_marker() {
         assert!(THANE_INSTRUCTIONS.contains(MARKER));
-        assert!(THANE_INSTRUCTIONS.contains("thane-agent-queue-instructions-v4"));
+        assert!(THANE_INSTRUCTIONS.contains("thane-agent-queue-instructions-v5"));
     }
 
     #[test]

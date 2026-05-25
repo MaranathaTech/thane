@@ -87,6 +87,15 @@ dictionary AuditEventInfo {
     string metadata_json;
 };
 
+dictionary AuditVerifyResult {
+    u32 events_checked;
+    boolean verified;
+    // None on success; on failure carries the first-failure description in the
+    // form "kind: <kind>; event_index: <i>; event_id: <uuid>" so the Swift UI
+    // can show it without needing a richer enum across the FFI.
+    string? failure_summary;
+};
+
 dictionary BridgeChatRecord {
     string conversation_id;
     string name;
@@ -272,8 +281,28 @@ interface ThaneBridge {
 
     sequence<AuditEventInfo> list_audit_events(BridgeAuditSeverity? min_severity);
     string export_audit_json();
-    void clear_audit_log();
+    boolean clear_audit_log_admin(string reason);
+    boolean audit_allow_clear();
+    u32 audit_retention_days();
+    boolean audit_encryption_enabled();
+    string audit_secret_backend_name();
+    AuditVerifyResult verify_audit_integrity();
     sequence<BridgeChatRecord> poll_claude_app_chats();
+
+    // ── External audit sinks (Phase 5) ──
+    //
+    // Returns the per-sink runtime status as a JSON string with shape
+    // `{ "sinks": [ { "name", "status", "queued", "sent_total", "dlq_total", ... } ] }`.
+    // Returns `{ "sinks": [] }` when no external sink is configured.
+    string audit_sink_status_json();
+    // Returns the most recent dead-letter entries as a JSON string with shape
+    // `{ "total", "returned", "entries": [...] }`. `limit` bounds the entries
+    // array; pass a large number for "all".
+    string audit_dlq_list_json(u64 limit);
+    // Re-enqueue every (or filtered) DLQ entry. Returns the count retried.
+    u32 audit_dlq_retry(string? sink_filter, string? event_id);
+    // Truncate the DLQ file. Returns false if blocked by audit-allow-clear.
+    boolean audit_dlq_clear();
 
     // ── Agent queue ──
 

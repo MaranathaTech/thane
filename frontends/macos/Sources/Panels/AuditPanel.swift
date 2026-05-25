@@ -24,6 +24,10 @@ final class AuditPanel: NSView, ReloadablePanel {
     private let toPicker = NSDatePicker()
     private let customDateRow = NSStackView()
     private let retentionLabel = NSTextField(labelWithString: "")
+    private var verifyBtn: NSButton?
+    /// Phase 5: row of per-sink status pills. Lives above the filter row.
+    /// Empty / hidden when no external sink is configured.
+    private let sinkPillsRow = NSStackView()
     private var allEvents: [AuditEventInfoDTO] = []
     private var filteredEvents: [AuditEventInfoDTO] = []
     private var minSeverity: AuditSeverityDTO? = nil
@@ -57,6 +61,75 @@ final class AuditPanel: NSView, ReloadablePanel {
             allEvents = bridge.loadAuditEvents(from: from, to: to)
         }
         applyFilter()
+        refreshSinkPills()
+    }
+
+    /// Rebuild the per-sink status pill row from the latest dispatcher snapshot.
+    /// Hidden when no sink is configured.
+    private func refreshSinkPills() {
+        // Remove old pills.
+        for arranged in sinkPillsRow.arrangedSubviews {
+            sinkPillsRow.removeArrangedSubview(arranged)
+            arranged.removeFromSuperview()
+        }
+        let sinks = bridge.auditSinkStatus()
+        if sinks.isEmpty {
+            sinkPillsRow.isHidden = true
+            return
+        }
+        sinkPillsRow.isHidden = false
+
+        let label = NSTextField(labelWithString: "Sinks:")
+        label.font = ThaneTheme.uiFont(size: 11)
+        label.textColor = ThaneTheme.secondaryText
+        sinkPillsRow.addArrangedSubview(label)
+
+        for sink in sinks {
+            let btn = NSButton(title: sink.name, target: self, action: #selector(sinkPillClicked(_:)))
+            btn.bezelStyle = .recessed
+            btn.controlSize = .small
+            btn.font = ThaneTheme.uiFont(size: ThaneTheme.smallFontSize)
+            // Tag carries the index so the click handler can re-fetch the sink dict.
+            btn.tag = sinkPillsRow.arrangedSubviews.count - 1
+            switch sink.status {
+            case "failing":
+                btn.contentTintColor = NSColor.systemRed
+            case "degraded":
+                btn.contentTintColor = NSColor.systemYellow
+            default:
+                btn.contentTintColor = NSColor.systemGreen
+            }
+            btn.toolTip = "\(sink.name): \(sink.status) — queued \(sink.queued), sent \(sink.sentTotal), DLQ \(sink.dlqTotal)"
+            sinkPillsRow.addArrangedSubview(btn)
+        }
+    }
+
+    @objc private func sinkPillClicked(_ sender: NSButton) {
+        let sinks = bridge.auditSinkStatus()
+        // The tag is (pill button index in the row, minus the "Sinks:" label).
+        // We re-derive it instead of trusting tag because the row may have
+        // re-rendered between click registration and click delivery.
+        guard let arrangedIdx = sinkPillsRow.arrangedSubviews.firstIndex(of: sender) else { return }
+        let sinkIdx = arrangedIdx - 1 // first arranged subview is the "Sinks:" label
+        guard sinkIdx >= 0 && sinkIdx < sinks.count else { return }
+        showSinkDetailDialog(sinks[sinkIdx])
+    }
+
+    private func showSinkDetailDialog(_ sink: RustBridge.SinkStatusDTO) {
+        let alert = NSAlert()
+        alert.messageText = "Audit Sink: \(sink.name)"
+        let lines: [String] = [
+            "Status: \(sink.status)",
+            "Enabled: \(sink.enabled)",
+            "Queued: \(sink.queued)",
+            "Sent total: \(sink.sentTotal)",
+            "DLQ total: \(sink.dlqTotal)",
+            "Last success: \(sink.lastSuccess ?? "—")",
+            "Last error: \(sink.lastError ?? "—")",
+        ]
+        alert.informativeText = lines.joined(separator: "\n")
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: self.window ?? NSApp.mainWindow!) { _ in }
     }
 
     // MARK: - Setup
@@ -72,6 +145,25 @@ final class AuditPanel: NSView, ReloadablePanel {
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(titleLabel)
 
+        // Phase 4: at-rest encryption indicator. The lock icon sits next to the
+        // title when `audit-encryption-enabled` is true (the default).
+        let encryptionEnabled = (bridge.configGet(key: "audit-encryption-enabled") ?? "true") != "false"
+        if encryptionEnabled {
+            let lockImage = NSImage(systemSymbolName: "lock.shield", accessibilityDescription: "Audit logs encrypted at rest")
+            let lockView = NSImageView(image: lockImage ?? NSImage())
+            lockView.symbolConfiguration = .init(pointSize: 11, weight: .medium)
+            lockView.contentTintColor = ThaneTheme.secondaryText
+            lockView.toolTip = "Audit logs encrypted at rest (AES-256-GCM). Key stored in Keychain."
+            lockView.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(lockView)
+            NSLayoutConstraint.activate([
+                lockView.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+                lockView.leadingAnchor.constraint(equalTo: titleLabel.trailingAnchor, constant: 6),
+                lockView.widthAnchor.constraint(equalToConstant: 14),
+                lockView.heightAnchor.constraint(equalToConstant: 14),
+            ])
+        }
+
         // Action buttons
         let exportBtn = NSButton(title: "Export JSON", target: self, action: #selector(exportClicked))
         exportBtn.bezelStyle = .recessed
@@ -85,7 +177,19 @@ final class AuditPanel: NSView, ReloadablePanel {
         clearBtn.controlSize = .small
         clearBtn.font = ThaneTheme.uiFont(size: ThaneTheme.smallFontSize)
         clearBtn.translatesAutoresizingMaskIntoConstraints = false
+        // Audit clearing is opt-in via `audit-allow-clear`. Hide the control unless
+        // policy permits it; the underlying call still re-checks.
+        clearBtn.isHidden = !bridge.auditAllowClear
         addSubview(clearBtn)
+
+        let verifyBtn = NSButton(title: "Verify", target: self, action: #selector(verifyClicked))
+        verifyBtn.bezelStyle = .recessed
+        verifyBtn.controlSize = .small
+        verifyBtn.font = ThaneTheme.uiFont(size: ThaneTheme.smallFontSize)
+        verifyBtn.toolTip = "Verify the cryptographic integrity of the audit log"
+        verifyBtn.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(verifyBtn)
+        self.verifyBtn = verifyBtn
 
         // ── Date range selector ──
         dateRangeControl.segmentCount = 4
@@ -106,13 +210,24 @@ final class AuditPanel: NSView, ReloadablePanel {
         customDateRow.isHidden = true
         addSubview(customDateRow)
 
-        // Retention hint
+        // Retention hint — text derived from `audit-retention-days` policy.
         retentionLabel.font = ThaneTheme.uiFont(size: 10)
         retentionLabel.textColor = ThaneTheme.tertiaryText
-        retentionLabel.stringValue = "Free tier: logs retained for \(RustBridge.auditRetentionDays) days"
+        let retention = bridge.auditRetentionDays
+        retentionLabel.stringValue = retention == 0
+            ? "Logs retained indefinitely"
+            : "Logs retained for \(retention) days"
         retentionLabel.translatesAutoresizingMaskIntoConstraints = false
         retentionLabel.isHidden = true
         addSubview(retentionLabel)
+
+        // Phase 5: per-sink status pills row (hidden when no sink configured).
+        sinkPillsRow.orientation = .horizontal
+        sinkPillsRow.spacing = 4
+        sinkPillsRow.alignment = .centerY
+        sinkPillsRow.isHidden = true
+        sinkPillsRow.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(sinkPillsRow)
 
         // Severity filter
         filterControl.segmentCount = 4
@@ -169,8 +284,11 @@ final class AuditPanel: NSView, ReloadablePanel {
             clearBtn.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
             clearBtn.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
 
+            verifyBtn.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+            verifyBtn.trailingAnchor.constraint(equalTo: clearBtn.leadingAnchor, constant: -4),
+
             exportBtn.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-            exportBtn.trailingAnchor.constraint(equalTo: clearBtn.leadingAnchor, constant: -4),
+            exportBtn.trailingAnchor.constraint(equalTo: verifyBtn.leadingAnchor, constant: -4),
 
             dateRangeControl.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
             dateRangeControl.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
@@ -183,7 +301,11 @@ final class AuditPanel: NSView, ReloadablePanel {
             retentionLabel.topAnchor.constraint(equalTo: customDateRow.bottomAnchor, constant: 2),
             retentionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
 
-            filterControl.topAnchor.constraint(equalTo: retentionLabel.bottomAnchor, constant: 6),
+            sinkPillsRow.topAnchor.constraint(equalTo: retentionLabel.bottomAnchor, constant: 4),
+            sinkPillsRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            sinkPillsRow.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
+
+            filterControl.topAnchor.constraint(equalTo: sinkPillsRow.bottomAnchor, constant: 6),
             filterControl.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             filterControl.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
 
@@ -219,9 +341,12 @@ final class AuditPanel: NSView, ReloadablePanel {
         fromPicker.font = ThaneTheme.uiFont(size: ThaneTheme.smallFontSize)
         fromPicker.target = self
         fromPicker.action = #selector(customDateChanged)
-        // Limit to retention window
+        // Limit to retention window. `0` is the retain-forever sentinel — fall back to
+        // a year so the picker is still usable.
         let calendar = Calendar.current
-        fromPicker.minDate = calendar.date(byAdding: .day, value: -RustBridge.auditRetentionDays, to: Date())
+        let retentionDays = bridge.auditRetentionDays
+        let effectiveLookback = retentionDays == 0 ? 365 : retentionDays
+        fromPicker.minDate = calendar.date(byAdding: .day, value: -effectiveLookback, to: Date())
         fromPicker.maxDate = Date()
 
         let toLabel = NSTextField(labelWithString: "To:")
@@ -348,27 +473,56 @@ final class AuditPanel: NSView, ReloadablePanel {
         }
     }
 
+    @objc private func verifyClicked() {
+        let result = bridge.verifyAuditIntegrity()
+        let alert = NSAlert()
+        alert.alertStyle = result.verified ? .informational : .critical
+        if result.verified {
+            alert.messageText = "Audit log verified (\(result.eventsChecked) events)"
+            alert.informativeText = "Signatures valid and hash chain intact."
+        } else {
+            alert.messageText = "Audit log integrity FAILED"
+            let summary = result.failureSummary ?? "Verification returned no failure detail."
+            alert.informativeText = "Examined \(result.eventsChecked) events before failure.\n\(summary)"
+        }
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: self.window ?? NSApp.mainWindow!) { _ in }
+    }
+
     @objc private func clearClicked() {
         let count = bridge.auditEventCount
         let alert = NSAlert()
         alert.messageText = "Clear Audit Log?"
-        alert.informativeText = "This action will be recorded as a Critical audit event. \(count) events will be removed."
+        alert.informativeText = "This action will be recorded as a Critical audit event with the reason below. \(count) events will be removed."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Clear")
         alert.addButton(withTitle: "Cancel")
 
-        guard let window = self.window ?? NSApp.mainWindow else {
-            if alert.runModal() == .alertFirstButtonReturn {
-                bridge.clearAuditLog()
-                reload()
+        let reasonField = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        reasonField.placeholderString = "Reason (required)"
+        alert.accessoryView = reasonField
+
+        let attempt: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self = self, response == .alertFirstButtonReturn else { return }
+            let reason = reasonField.stringValue
+            if self.bridge.clearAuditLogAdmin(reason: reason) {
+                self.reload()
+            } else {
+                let nag = NSAlert()
+                nag.messageText = "Audit clear rejected"
+                nag.informativeText = reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "A non-empty reason is required."
+                    : "Clearing is disabled by policy (audit-allow-clear)."
+                nag.alertStyle = .warning
+                nag.runModal()
             }
+        }
+
+        guard let window = self.window ?? NSApp.mainWindow else {
+            attempt(alert.runModal())
             return
         }
-        alert.beginSheetModal(for: window) { [weak self] response in
-            guard response == .alertFirstButtonReturn else { return }
-            self?.bridge.clearAuditLog()
-            self?.reload()
-        }
+        alert.beginSheetModal(for: window, completionHandler: attempt)
     }
 
     @objc private func rowDoubleClicked() {
@@ -582,6 +736,25 @@ extension AuditPanel: NSTableViewDelegate {
             agentBadge = ab
         }
 
+        // [redacted] indicator badge — shown when description or metadata
+        // carries the `[REDACTED:` marker stamped on by the Rust redactor.
+        var redactedBadge: NSTextField?
+        if AuditPanel.eventHasRedaction(event) {
+            let rb = NSTextField(labelWithString: " [redacted] ")
+            rb.font = ThaneTheme.uiFont(size: 9)
+            rb.textColor = ThaneTheme.tertiaryText
+            rb.wantsLayer = true
+            rb.layer?.cornerRadius = 3
+            rb.layer?.borderWidth = 1
+            rb.layer?.borderColor = ThaneTheme.tertiaryText.cgColor
+            rb.alignment = .center
+            rb.toolTip = "Free-form content was scrubbed before this event was stored. " +
+                "Adjust under Settings → Audit Redaction Policy."
+            rb.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(rb)
+            redactedBadge = rb
+        }
+
         // Description (strip literal \n for single-line list display)
         let descText = event.description
             .replacingOccurrences(of: "\\n", with: " ")
@@ -628,8 +801,24 @@ extension AuditPanel: NSTableViewDelegate {
             ])
         }
 
+        if let rb = redactedBadge {
+            constraints.append(contentsOf: [
+                rb.centerYAnchor.constraint(equalTo: timeLabel.centerYAnchor),
+                rb.leadingAnchor.constraint(
+                    equalTo: agentBadge?.trailingAnchor ?? timeLabel.trailingAnchor,
+                    constant: 6),
+            ])
+        }
+
         NSLayoutConstraint.activate(constraints)
 
         return cell
+    }
+
+    /// Whether any free-form field on `event` carries the redaction marker.
+    /// Mirrors `event_has_redaction` in `crates/thane-gtk/src/sidebar/audit_panel.rs`.
+    static func eventHasRedaction(_ event: AuditEventInfoDTO) -> Bool {
+        if event.description.contains("[REDACTED:") { return true }
+        return event.metadataJson.contains("[REDACTED:")
     }
 }

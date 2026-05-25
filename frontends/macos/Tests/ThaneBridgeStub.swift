@@ -26,4 +26,29 @@ class ThaneBridge {
     func sandboxGetCommand(workspaceId: String, shell: String) -> SandboxCommand? {
         nil
     }
+
+    // Audit policy accessors — stubs so RustBridge.swift compiles in tests.
+    func auditAllowClear() -> Bool { false }
+    func auditRetentionDays() -> UInt32 { 90 }
+    func clearAuditLogAdmin(reason: String) -> Bool { false }
+
+    /// Stub mirror of UniFFI-generated `AuditVerifyResult`.
+    struct AuditVerifyResult {
+        let eventsChecked: UInt32
+        let verified: Bool
+        let failureSummary: String?
+    }
+
+    func verifyAuditIntegrity() -> AuditVerifyResult {
+        AuditVerifyResult(eventsChecked: 0, verified: true, failureSummary: nil)
+    }
+
+    // Phase 5: external sink stubs. All return safe defaults so the Swift
+    // panel code can be exercised in tests without a real Rust dispatcher.
+    func auditSinkStatusJson() -> String { "{\"sinks\":[]}" }
+    func auditDlqListJson(limit: UInt64) -> String {
+        "{\"total\":0,\"returned\":0,\"entries\":[]}"
+    }
+    func auditDlqRetry(sinkFilter: String?, eventId: String?) -> UInt32 { 0 }
+    func auditDlqClear() -> Bool { false }
 }

@@ -1539,19 +1539,117 @@ final class RustBridge {
         return str
     }
 
-    func clearAuditLog() {
+    /// Clear the in-memory audit log only when policy allows and a non-empty
+    /// reason has been supplied. Returns `true` on success.
+    @discardableResult
+    func clearAuditLogAdmin(reason: String) -> Bool {
+        let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        guard let bridge = rustCoreBridge, bridge.auditAllowClear() else { return false }
+        // Mirror the marker event in the Swift-side store so the panel UI shows it.
         let count = auditEvents.count
         logAuditEvent(
             workspaceId: "", eventType: "AuditLogCleared", severity: .critical,
             description: "Audit log cleared (\(count) events removed)",
-            metadata: ["events_cleared": "\(count)"])
-        // Keep only the clear marker (last event)
+            metadata: ["events_cleared": "\(count)", "reason": trimmed])
         if let last = auditEvents.last {
             auditEvents = [last]
         }
+        _ = bridge.clearAuditLogAdmin(reason: trimmed)
+        return true
+    }
+
+    /// Whether the Clear control should be exposed in the UI.
+    var auditAllowClear: Bool {
+        rustCoreBridge?.auditAllowClear() ?? false
+    }
+
+    /// Configured retention window. `0` means "retain forever".
+    var auditRetentionDays: Int {
+        Int(rustCoreBridge?.auditRetentionDays() ?? 90)
     }
 
     var auditEventCount: Int { auditEvents.count }
+
+    /// DTO returned by `verifyAuditIntegrity()`. Mirrors `AuditVerifyResult` in
+    /// the Rust bridge but lives in Swift so the panel code doesn't have to
+    /// import the generated UniFFI type.
+    struct AuditVerifyResultDTO {
+        let eventsChecked: UInt32
+        let verified: Bool
+        let failureSummary: String?
+    }
+
+    /// Verify the cryptographic integrity of the in-memory audit log.
+    /// Returns a never-nil DTO; on bridge failure we return a synthetic "failed"
+    /// result so the UI can still surface the problem.
+    func verifyAuditIntegrity() -> AuditVerifyResultDTO {
+        guard let bridge = rustCoreBridge else {
+            return AuditVerifyResultDTO(
+                eventsChecked: 0,
+                verified: false,
+                failureSummary: "Bridge not initialized"
+            )
+        }
+        let r = bridge.verifyAuditIntegrity()
+        return AuditVerifyResultDTO(
+            eventsChecked: r.eventsChecked,
+            verified: r.verified,
+            failureSummary: r.failureSummary
+        )
+    }
+
+    // MARK: - Phase 5: external audit sinks
+
+    /// DTO mirroring `SinkStatus` in the Rust bridge.
+    struct SinkStatusDTO {
+        let name: String
+        let enabled: Bool
+        let queued: Int
+        let sentTotal: UInt64
+        let dlqTotal: UInt64
+        let lastSuccess: String?
+        let lastError: String?
+        let status: String  // "healthy" | "degraded" | "failing"
+    }
+
+    /// Snapshot of every configured sink's runtime status, or empty when no
+    /// external sink is enabled.
+    func auditSinkStatus() -> [SinkStatusDTO] {
+        guard let bridge = rustCoreBridge else { return [] }
+        let json = bridge.auditSinkStatusJson()
+        guard let data = json.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sinks = parsed["sinks"] as? [[String: Any]]
+        else { return [] }
+        return sinks.map { dict in
+            SinkStatusDTO(
+                name: dict["name"] as? String ?? "?",
+                enabled: dict["enabled"] as? Bool ?? false,
+                queued: (dict["queued"] as? Int) ?? 0,
+                sentTotal: (dict["sent_total"] as? UInt64) ?? UInt64(dict["sent_total"] as? Int ?? 0),
+                dlqTotal: (dict["dlq_total"] as? UInt64) ?? UInt64(dict["dlq_total"] as? Int ?? 0),
+                lastSuccess: dict["last_success"] as? String,
+                lastError: dict["last_error"] as? String,
+                status: dict["status"] as? String ?? "healthy"
+            )
+        }
+    }
+
+    /// Raw DLQ JSON snapshot (newest entries first, capped at `limit`).
+    func auditDlqListJson(limit: UInt64 = 100) -> String {
+        rustCoreBridge?.auditDlqListJson(limit: limit) ?? "{\"sinks\":[]}"
+    }
+
+    /// Retry DLQ entries. Returns count retried (0 if no dispatcher).
+    func auditDlqRetry(sinkFilter: String? = nil, eventId: String? = nil) -> UInt32 {
+        rustCoreBridge?.auditDlqRetry(sinkFilter: sinkFilter, eventId: eventId) ?? 0
+    }
+
+    /// Truncate DLQ (refused unless audit-allow-clear is true).
+    func auditDlqClear() -> Bool {
+        rustCoreBridge?.auditDlqClear() ?? false
+    }
 
     /// Async version: scans JSONL files on background thread, processes results on main thread.
     func scanSessionPromptsAsync(completion: @escaping @MainActor () -> Void) {
@@ -1711,9 +1809,6 @@ final class RustBridge {
     /// Number of events already flushed to disk.
     private var auditFlushedCount = 0
 
-    /// Maximum audit log retention in days (free tier).
-    static let auditRetentionDays = 7
-
     /// Directory where daily audit log files are stored.
     static var auditLogDirectory: String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -1855,7 +1950,10 @@ final class RustBridge {
         guard let files = try? fm.contentsOfDirectory(atPath: auditDir) else { return }
 
         let calendar = Calendar.current
-        guard let cutoff = calendar.date(byAdding: .day, value: -Self.auditRetentionDays, to: Date()) else { return }
+        let retention = self.auditRetentionDays
+        // `0` is the sentinel for retain-forever — skip the purge entirely.
+        guard retention > 0,
+              let cutoff = calendar.date(byAdding: .day, value: -retention, to: Date()) else { return }
         let cutoffDay = calendar.startOfDay(for: cutoff)
 
         for file in files {
@@ -2773,8 +2871,9 @@ final class RustBridge {
             return (.object(["entries": .array(arr)]), nil)
 
         case "agent_queue.status":
-            guard let entryId = obj["id"]?.stringValue else {
-                return (nil, JsonRpcError(code: -32602, message: "Missing 'id' parameter", data: nil))
+            let entryIdOpt = obj["entry_id"]?.stringValue ?? obj["id"]?.stringValue
+            guard let entryId = entryIdOpt else {
+                return (nil, JsonRpcError(code: -32602, message: "Missing 'entry_id' parameter", data: nil))
             }
             if let entry = queueStatus(entryId: entryId) {
                 return (.object([
@@ -2786,8 +2885,9 @@ final class RustBridge {
             return (nil, JsonRpcError(code: -32602, message: "Entry not found", data: nil))
 
         case "agent_queue.cancel":
-            guard let entryId = obj["id"]?.stringValue else {
-                return (nil, JsonRpcError(code: -32602, message: "Missing 'id' parameter", data: nil))
+            let entryIdOpt = obj["entry_id"]?.stringValue ?? obj["id"]?.stringValue
+            guard let entryId = entryIdOpt else {
+                return (nil, JsonRpcError(code: -32602, message: "Missing 'entry_id' parameter", data: nil))
             }
             let ok = queueCancel(entryId: entryId)
             return (.object(["cancelled": .bool(ok)]), nil)

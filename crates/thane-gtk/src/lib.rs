@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod application;
+pub mod audit_sink_runtime;
 pub mod browser;
 pub mod css;
 pub mod fonts;

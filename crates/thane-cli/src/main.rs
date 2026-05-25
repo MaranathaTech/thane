@@ -21,6 +21,13 @@ enum Commands {
     /// Check if thane is running.
     Ping,
 
+    /// Print daemon health (shortcut for `system status`).
+    Status,
+
+    /// Manage the background daemon (start/stop/restart).
+    #[command(subcommand)]
+    Daemon(commands::daemon::DaemonCommand),
+
     /// Workspace management.
     #[command(subcommand)]
     Workspace(commands::workspace::WorkspaceCommand),
@@ -53,6 +60,10 @@ enum Commands {
     #[command(subcommand)]
     Audit(commands::audit::AuditCommand),
 
+    /// Enterprise audit-policy enrollment.
+    #[command(subcommand)]
+    Enterprise(commands::enterprise::EnterpriseCommand),
+
     /// Agent queue management.
     #[command(subcommand)]
     Queue(commands::queue::QueueCommand),
@@ -76,6 +87,8 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Ping => commands::system::ping(&socket_path).await,
+        Commands::Status => commands::system::status(&socket_path).await,
+        Commands::Daemon(cmd) => cmd.execute(&socket_path).await,
         Commands::Workspace(cmd) => cmd.execute(&socket_path).await,
         Commands::Surface(cmd) => cmd.execute(&socket_path).await,
         Commands::Notification(cmd) => cmd.execute(&socket_path).await,
@@ -84,6 +97,7 @@ async fn main() -> Result<()> {
         Commands::Terminal(cmd) => cmd.execute(&socket_path).await,
         Commands::Sandbox(cmd) => cmd.execute(&socket_path).await,
         Commands::Audit(cmd) => cmd.execute(&socket_path).await,
+        Commands::Enterprise(cmd) => cmd.execute(&socket_path).await,
         Commands::Queue(cmd) => cmd.execute(&socket_path).await,
         Commands::System(cmd) => cmd.execute(&socket_path).await,
     }

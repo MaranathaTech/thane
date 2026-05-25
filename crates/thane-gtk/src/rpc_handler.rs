@@ -982,13 +982,37 @@ fn handle_request(
             }
         }
 
+        Method::AuditVerify => {
+            let s = state.borrow();
+            let result = s.audit_log().verify_integrity();
+            // Serialize VerifyResult through serde so the snake_case enum names
+            // come through unchanged on the wire.
+            match serde_json::to_value(&result) {
+                Ok(v) => Some(RpcResponse::success(id, v)),
+                Err(e) => Some(RpcResponse::error(
+                    id,
+                    -1,
+                    format!("Verify serialization error: {e}"),
+                )),
+            }
+        }
+
         Method::AuditClear => {
             let mut s = state.borrow_mut();
-            s.audit_log_mut().clear();
-            Some(RpcResponse::success(
-                id,
-                json!({ "ok": true, "message": "Audit log cleared" }),
-            ))
+            let allow_clear = s.config().audit_allow_clear();
+            let reason = params
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .filter(|r| !r.trim().is_empty())
+                .unwrap_or("RPC clear request")
+                .to_string();
+            match s.audit_log_mut().clear_admin(reason, allow_clear) {
+                Ok(()) => Some(RpcResponse::success(
+                    id,
+                    json!({ "ok": true, "message": "Audit log cleared" }),
+                )),
+                Err(e) => Some(RpcResponse::error(id, -1, e.to_string())),
+            }
         }
 
         Method::AuditSetSensitivePolicy => {
@@ -1096,5 +1120,109 @@ fn handle_request(
                 serde_json::to_value(s.config().all()).unwrap_or_default();
             Some(RpcResponse::success(id, values))
         }
+
+        // ── Phase 5: external sink RPCs ────────────────────────────────────
+        // The GTK process has its own dispatcher (lazy-spawned at first
+        // audit-log construction) when sinks are configured. We pull a
+        // snapshot from `audit_sink_runtime` and return whatever it has.
+        Method::AuditSinkStatus => {
+            let config = state.borrow().config().clone();
+            let report = crate::audit_sink_runtime::dispatcher(&config)
+                .map(|d| d.status_snapshot_blocking());
+            match report {
+                Some(r) => match serde_json::to_value(&r) {
+                    Ok(v) => Some(RpcResponse::success(id, v)),
+                    Err(e) => Some(RpcResponse::internal_error(id, format!("serialize: {e}"))),
+                },
+                None => Some(RpcResponse::success(id, json!({"sinks": []}))),
+            }
+        }
+
+        Method::AuditDlqList => {
+            let dlq = audit_dlq_for_this_process();
+            let filter_sink = params.get("sink").and_then(|v| v.as_str());
+            let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+            let entries = match filter_sink {
+                Some(name) => dlq.read_by_sink(name),
+                None => dlq.read_all(),
+            };
+            match entries {
+                Ok(mut v) => {
+                    v.reverse();
+                    let total = v.len();
+                    v.truncate(limit);
+                    let json_v = serde_json::to_value(&v).unwrap_or_default();
+                    Some(RpcResponse::success(
+                        id,
+                        json!({
+                            "total": total,
+                            "returned": json_v.as_array().map(|a| a.len()).unwrap_or(0),
+                            "entries": json_v,
+                        }),
+                    ))
+                }
+                Err(e) => Some(RpcResponse::internal_error(id, format!("DLQ read: {e}"))),
+            }
+        }
+
+        Method::AuditDlqRetry => {
+            let config = state.borrow().config().clone();
+            let dispatcher = match crate::audit_sink_runtime::dispatcher(&config) {
+                Some(d) => d,
+                None => {
+                    return Some(RpcResponse::error(
+                        id,
+                        -1,
+                        "No external sinks configured; nothing to retry",
+                    ));
+                }
+            };
+            let dlq = audit_dlq_for_this_process();
+            let filter_sink = params.get("sink").and_then(|v| v.as_str());
+            let event_id = params.get("event_id").and_then(|v| v.as_str());
+            let entries = match dlq.read_all() {
+                Ok(v) => v,
+                Err(e) => return Some(RpcResponse::internal_error(id, format!("DLQ read: {e}"))),
+            };
+            let mut count = 0u32;
+            for entry in &entries {
+                if let Some(s) = filter_sink
+                    && entry.sink != s { continue; }
+                if let Some(eid) = event_id
+                    && entry.event.id.to_string() != eid { continue; }
+                dispatcher.retry_event(&entry.event);
+                count += 1;
+            }
+            Some(RpcResponse::success(id, json!({"retried": count})))
+        }
+
+        Method::AuditDlqClear => {
+            let s = state.borrow();
+            if !s.config().audit_allow_clear() {
+                return Some(RpcResponse::error(
+                    id,
+                    -32000,
+                    "DLQ clear refused: set audit-allow-clear = true in config",
+                ));
+            }
+            drop(s);
+            let dlq = audit_dlq_for_this_process();
+            match dlq.clear() {
+                Ok(()) => Some(RpcResponse::success(id, json!({"ok": true}))),
+                Err(e) => Some(RpcResponse::internal_error(id, format!("DLQ clear: {e}"))),
+            }
+        }
     }
+}
+
+/// Build a [`DeadLetterQueue`] handle pointed at the platform sessions dir.
+/// Both processes (GTK and daemon) write/read the same path, so DLQ
+/// inspection works from whichever one happens to host the IPC server.
+fn audit_dlq_for_this_process() -> thane_audit_sink::DeadLetterQueue {
+    use thane_platform::traits::PlatformDirs;
+    #[cfg(target_os = "macos")]
+    let dirs = thane_platform::MacosDirs;
+    #[cfg(target_os = "linux")]
+    let dirs = thane_platform::LinuxDirs;
+    thane_audit_sink::DeadLetterQueue::new(dirs.sessions_dir())
 }

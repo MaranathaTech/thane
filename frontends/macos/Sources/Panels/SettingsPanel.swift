@@ -25,8 +25,36 @@ final class SettingsPanel: NSView, ReloadablePanel {
 
     // Security
     private let sensitiveDataPopup = NSPopUpButton()
+    private let auditRedactionPopup = NSPopUpButton()
     private let auditCodeSessionsSwitch = NSSwitch()
     private let auditAppChatsSwitch = NSSwitch()
+    private let auditQueuePromptsSwitch = NSSwitch()
+    private let auditRetentionField = NSTextField()
+    private let auditAllowClearSwitch = NSSwitch()
+
+    // Audit Sinks (Phase 5)
+    private let auditSinkSyslogEnable = NSSwitch()
+    private let auditSinkSyslogHostField = NSTextField()
+    private let auditSinkSyslogSeverityPopup = NSPopUpButton()
+    private let auditSinkSyslogTestBtn = NSButton(title: "Send test event", target: nil, action: nil)
+    private let auditSinkWebhookEnable = NSSwitch()
+    private let auditSinkWebhookUrlField = NSTextField()
+    private let auditSinkWebhookSeverityPopup = NSPopUpButton()
+    private let auditSinkWebhookTestBtn = NSButton(title: "Send test event", target: nil, action: nil)
+
+    // Audit Sinks (Phase 6) — enterprise destinations
+    private let auditSinkS3Enable = NSSwitch()
+    private let auditSinkS3BucketField = NSTextField()
+    private let auditSinkS3SeverityPopup = NSPopUpButton()
+    private let auditSinkS3TestBtn = NSButton(title: "Send test event", target: nil, action: nil)
+    private let auditSinkSplunkEnable = NSSwitch()
+    private let auditSinkSplunkUrlField = NSTextField()
+    private let auditSinkSplunkSeverityPopup = NSPopUpButton()
+    private let auditSinkSplunkTestBtn = NSButton(title: "Send test event", target: nil, action: nil)
+    private let auditSinkDatadogEnable = NSSwitch()
+    private let auditSinkDatadogRegionPopup = NSPopUpButton()
+    private let auditSinkDatadogSeverityPopup = NSPopUpButton()
+    private let auditSinkDatadogTestBtn = NSButton(title: "Send test event", target: nil, action: nil)
 
     // Queue
     private let queueModePopup = NSPopUpButton()
@@ -185,6 +213,24 @@ final class SettingsPanel: NSView, ReloadablePanel {
         sensitiveDataPopup.controlSize = .small
         stack.addArrangedSubview(makeFormRow("Sensitive Data Policy", control: sensitiveDataPopup))
 
+        auditRedactionPopup.addItems(withTitles: [
+            "None — store events verbatim (NOT RECOMMENDED)",
+            "Redact — scrub detected secrets and PII (recommended)",
+            "Strict — additionally strip free-form fields",
+        ])
+        auditRedactionPopup.target = self
+        auditRedactionPopup.action = #selector(auditRedactionChanged)
+        auditRedactionPopup.controlSize = .small
+        stack.addArrangedSubview(makeFormRow("Audit Redaction Policy", control: auditRedactionPopup))
+
+        let redactionHint = makeLabel(
+            "Scrubs detected secrets/PII before events hit disk. The HMAC is computed over the redacted form.",
+            bold: false, size: 10)
+        redactionHint.textColor = ThaneTheme.tertiaryText
+        redactionHint.lineBreakMode = .byWordWrapping
+        redactionHint.preferredMaxLayoutWidth = 240
+        stack.addArrangedSubview(redactionHint)
+
         auditCodeSessionsSwitch.target = self
         auditCodeSessionsSwitch.action = #selector(auditCodeSessionsChanged)
         auditCodeSessionsSwitch.controlSize = .small
@@ -200,6 +246,168 @@ final class SettingsPanel: NSView, ReloadablePanel {
         auditHint.lineBreakMode = .byWordWrapping
         auditHint.preferredMaxLayoutWidth = 240
         stack.addArrangedSubview(auditHint)
+
+        auditQueuePromptsSwitch.target = self
+        auditQueuePromptsSwitch.action = #selector(auditQueuePromptsChanged)
+        auditQueuePromptsSwitch.controlSize = .small
+        stack.addArrangedSubview(makeFormRow("Audit Queue Prompts", control: auditQueuePromptsSwitch))
+
+        auditRetentionField.placeholderString = "90"
+        auditRetentionField.font = ThaneTheme.uiFont(size: ThaneTheme.smallFontSize)
+        auditRetentionField.delegate = self
+        stack.addArrangedSubview(makeFormRow("Audit Retention (days)", control: auditRetentionField))
+
+        let retentionHint = makeLabel("Rotated audit files older than this are purged. 0 = keep forever.", bold: false, size: 10)
+        retentionHint.textColor = ThaneTheme.tertiaryText
+        retentionHint.lineBreakMode = .byWordWrapping
+        retentionHint.preferredMaxLayoutWidth = 240
+        stack.addArrangedSubview(retentionHint)
+
+        auditAllowClearSwitch.target = self
+        auditAllowClearSwitch.action = #selector(auditAllowClearChanged)
+        auditAllowClearSwitch.controlSize = .small
+        stack.addArrangedSubview(makeFormRow("Allow Audit Log Clear", control: auditAllowClearSwitch))
+
+        let clearHint = makeLabel("When off, the Clear control is hidden. Required for most compliance policies.", bold: false, size: 10)
+        clearHint.textColor = ThaneTheme.tertiaryText
+        clearHint.lineBreakMode = .byWordWrapping
+        clearHint.preferredMaxLayoutWidth = 240
+        stack.addArrangedSubview(clearHint)
+
+        // ── Audit Sinks (Phase 5) ──
+        // External shipping of audit events. Each sink has an enable toggle,
+        // host/url field, min-severity selector, and a Test button that fires
+        // a synthetic Info event so the operator can verify connectivity.
+        stack.addArrangedSubview(makeSectionHeader("Audit Sinks"))
+
+        auditSinkSyslogEnable.target = self
+        auditSinkSyslogEnable.action = #selector(auditSinkSyslogEnableChanged)
+        auditSinkSyslogEnable.controlSize = .small
+        stack.addArrangedSubview(makeFormRow("Ship to syslog (TCP/TLS)", control: auditSinkSyslogEnable))
+
+        auditSinkSyslogHostField.placeholderString = "logs.example.com:6514"
+        auditSinkSyslogHostField.font = ThaneTheme.uiFont(size: ThaneTheme.smallFontSize)
+        auditSinkSyslogHostField.delegate = self
+        stack.addArrangedSubview(makeFormRow("Syslog host", control: auditSinkSyslogHostField))
+
+        auditSinkSyslogSeverityPopup.addItems(withTitles: ["Info", "Warning", "Alert", "Critical"])
+        auditSinkSyslogSeverityPopup.target = self
+        auditSinkSyslogSeverityPopup.action = #selector(auditSinkSyslogSeverityChanged)
+        auditSinkSyslogSeverityPopup.controlSize = .small
+        stack.addArrangedSubview(makeFormRow("Syslog min severity", control: auditSinkSyslogSeverityPopup))
+
+        auditSinkSyslogTestBtn.target = self
+        auditSinkSyslogTestBtn.action = #selector(auditSinkSyslogTestClicked)
+        auditSinkSyslogTestBtn.bezelStyle = .recessed
+        auditSinkSyslogTestBtn.controlSize = .small
+        auditSinkSyslogTestBtn.toolTip = "Fire a synthetic Info-severity event to verify syslog delivery."
+        stack.addArrangedSubview(auditSinkSyslogTestBtn)
+
+        auditSinkWebhookEnable.target = self
+        auditSinkWebhookEnable.action = #selector(auditSinkWebhookEnableChanged)
+        auditSinkWebhookEnable.controlSize = .small
+        stack.addArrangedSubview(makeFormRow("Ship to webhook (HMAC-signed)", control: auditSinkWebhookEnable))
+
+        auditSinkWebhookUrlField.placeholderString = "https://siem.example.com/ingest"
+        auditSinkWebhookUrlField.font = ThaneTheme.uiFont(size: ThaneTheme.smallFontSize)
+        auditSinkWebhookUrlField.delegate = self
+        stack.addArrangedSubview(makeFormRow("Webhook URL", control: auditSinkWebhookUrlField))
+
+        auditSinkWebhookSeverityPopup.addItems(withTitles: ["Info", "Warning", "Alert", "Critical"])
+        auditSinkWebhookSeverityPopup.target = self
+        auditSinkWebhookSeverityPopup.action = #selector(auditSinkWebhookSeverityChanged)
+        auditSinkWebhookSeverityPopup.controlSize = .small
+        stack.addArrangedSubview(makeFormRow("Webhook min severity", control: auditSinkWebhookSeverityPopup))
+
+        auditSinkWebhookTestBtn.target = self
+        auditSinkWebhookTestBtn.action = #selector(auditSinkWebhookTestClicked)
+        auditSinkWebhookTestBtn.bezelStyle = .recessed
+        auditSinkWebhookTestBtn.controlSize = .small
+        auditSinkWebhookTestBtn.toolTip = "Fire a synthetic Info-severity event to verify webhook delivery."
+        stack.addArrangedSubview(auditSinkWebhookTestBtn)
+
+        // S3 (Phase 6) — bucket is the primary field; advanced options (region,
+        // SSE, Object Lock, prefix, credentials) live in ~/.config/thane/config.
+        auditSinkS3Enable.target = self
+        auditSinkS3Enable.action = #selector(auditSinkS3EnableChanged)
+        auditSinkS3Enable.controlSize = .small
+        stack.addArrangedSubview(makeFormRow("Ship to S3 (gzip JSONL)", control: auditSinkS3Enable))
+
+        auditSinkS3BucketField.placeholderString = "my-org-audit-logs"
+        auditSinkS3BucketField.font = ThaneTheme.uiFont(size: ThaneTheme.smallFontSize)
+        auditSinkS3BucketField.delegate = self
+        stack.addArrangedSubview(makeFormRow("S3 bucket", control: auditSinkS3BucketField))
+
+        auditSinkS3SeverityPopup.addItems(withTitles: ["Info", "Warning", "Alert", "Critical"])
+        auditSinkS3SeverityPopup.target = self
+        auditSinkS3SeverityPopup.action = #selector(auditSinkS3SeverityChanged)
+        auditSinkS3SeverityPopup.controlSize = .small
+        stack.addArrangedSubview(makeFormRow("S3 min severity", control: auditSinkS3SeverityPopup))
+
+        auditSinkS3TestBtn.target = self
+        auditSinkS3TestBtn.action = #selector(auditSinkS3TestClicked)
+        auditSinkS3TestBtn.bezelStyle = .recessed
+        auditSinkS3TestBtn.controlSize = .small
+        auditSinkS3TestBtn.toolTip = "Fire a synthetic Info-severity event to verify S3 delivery."
+        stack.addArrangedSubview(auditSinkS3TestBtn)
+
+        // Splunk HEC (Phase 6).
+        auditSinkSplunkEnable.target = self
+        auditSinkSplunkEnable.action = #selector(auditSinkSplunkEnableChanged)
+        auditSinkSplunkEnable.controlSize = .small
+        stack.addArrangedSubview(makeFormRow("Ship to Splunk HEC", control: auditSinkSplunkEnable))
+
+        auditSinkSplunkUrlField.placeholderString = "https://splunk.example.com:8088/services/collector/event"
+        auditSinkSplunkUrlField.font = ThaneTheme.uiFont(size: ThaneTheme.smallFontSize)
+        auditSinkSplunkUrlField.delegate = self
+        stack.addArrangedSubview(makeFormRow("Splunk URL", control: auditSinkSplunkUrlField))
+
+        auditSinkSplunkSeverityPopup.addItems(withTitles: ["Info", "Warning", "Alert", "Critical"])
+        auditSinkSplunkSeverityPopup.target = self
+        auditSinkSplunkSeverityPopup.action = #selector(auditSinkSplunkSeverityChanged)
+        auditSinkSplunkSeverityPopup.controlSize = .small
+        stack.addArrangedSubview(makeFormRow("Splunk min severity", control: auditSinkSplunkSeverityPopup))
+
+        auditSinkSplunkTestBtn.target = self
+        auditSinkSplunkTestBtn.action = #selector(auditSinkSplunkTestClicked)
+        auditSinkSplunkTestBtn.bezelStyle = .recessed
+        auditSinkSplunkTestBtn.controlSize = .small
+        auditSinkSplunkTestBtn.toolTip = "Fire a synthetic Info-severity event to verify Splunk delivery."
+        stack.addArrangedSubview(auditSinkSplunkTestBtn)
+
+        // Datadog Logs (Phase 6). Region is a popup because crossing regions
+        // silently is a data-residency footgun.
+        auditSinkDatadogEnable.target = self
+        auditSinkDatadogEnable.action = #selector(auditSinkDatadogEnableChanged)
+        auditSinkDatadogEnable.controlSize = .small
+        stack.addArrangedSubview(makeFormRow("Ship to Datadog Logs", control: auditSinkDatadogEnable))
+
+        auditSinkDatadogRegionPopup.addItems(withTitles: ["us", "us3", "us5", "eu", "ap1"])
+        auditSinkDatadogRegionPopup.target = self
+        auditSinkDatadogRegionPopup.action = #selector(auditSinkDatadogRegionChanged)
+        auditSinkDatadogRegionPopup.controlSize = .small
+        stack.addArrangedSubview(makeFormRow("Datadog region", control: auditSinkDatadogRegionPopup))
+
+        auditSinkDatadogSeverityPopup.addItems(withTitles: ["Info", "Warning", "Alert", "Critical"])
+        auditSinkDatadogSeverityPopup.target = self
+        auditSinkDatadogSeverityPopup.action = #selector(auditSinkDatadogSeverityChanged)
+        auditSinkDatadogSeverityPopup.controlSize = .small
+        stack.addArrangedSubview(makeFormRow("Datadog min severity", control: auditSinkDatadogSeverityPopup))
+
+        auditSinkDatadogTestBtn.target = self
+        auditSinkDatadogTestBtn.action = #selector(auditSinkDatadogTestClicked)
+        auditSinkDatadogTestBtn.bezelStyle = .recessed
+        auditSinkDatadogTestBtn.controlSize = .small
+        auditSinkDatadogTestBtn.toolTip = "Fire a synthetic Info-severity event to verify Datadog delivery."
+        stack.addArrangedSubview(auditSinkDatadogTestBtn)
+
+        let sinksHint = makeLabel(
+            "Secrets (HMAC, HEC token, Datadog API key, S3 credentials) live in the platform secret store. Full per-sink options live in ~/.config/thane/config — see AUDIT_LOG.md. Restart thane for changes to take effect.",
+            bold: false, size: 10)
+        sinksHint.textColor = ThaneTheme.tertiaryText
+        sinksHint.lineBreakMode = .byWordWrapping
+        sinksHint.preferredMaxLayoutWidth = 240
+        stack.addArrangedSubview(sinksHint)
 
         // ── Agent Queue ──
         stack.addArrangedSubview(makeSectionHeader("Agent Queue"))
@@ -375,8 +583,49 @@ final class SettingsPanel: NSView, ReloadablePanel {
         let sensitivePolicy = bridge.configGet(key: "sensitive-data-policy") ?? "warn"
         sensitiveDataPopup.selectItem(withTitle: sensitivePolicy.capitalized)
 
+        let redactionPolicy = (bridge.configGet(key: "audit-redaction-policy") ?? "redact").lowercased()
+        let redactionIndex: Int
+        switch redactionPolicy {
+        case "none": redactionIndex = 0
+        case "strict": redactionIndex = 2
+        default: redactionIndex = 1
+        }
+        auditRedactionPopup.selectItem(at: redactionIndex)
+
         auditCodeSessionsSwitch.state = (bridge.configGet(key: "audit-claude-code-sessions") ?? "true") == "true" ? .on : .off
         auditAppChatsSwitch.state = (bridge.configGet(key: "audit-claude-app-chats") ?? "false") == "true" ? .on : .off
+        auditQueuePromptsSwitch.state = (bridge.configGet(key: "audit-queue-prompts") ?? "true") == "true" ? .on : .off
+        auditRetentionField.stringValue = bridge.configGet(key: "audit-retention-days") ?? "90"
+        auditAllowClearSwitch.state = (bridge.configGet(key: "audit-allow-clear") ?? "false") == "true" ? .on : .off
+
+        // Phase 5: audit sink defaults.
+        auditSinkSyslogEnable.state = (bridge.configGet(key: "audit-sink-syslog-enabled") ?? "false") == "true" ? .on : .off
+        let syslogHost = bridge.configGet(key: "audit-sink-syslog-host") ?? ""
+        let syslogPort = bridge.configGet(key: "audit-sink-syslog-port") ?? "6514"
+        auditSinkSyslogHostField.stringValue = syslogHost.isEmpty
+            ? ""
+            : "\(syslogHost):\(syslogPort)"
+        auditSinkSyslogSeverityPopup.selectItem(withTitle:
+            (bridge.configGet(key: "audit-sink-syslog-min-severity") ?? "info").capitalized)
+        auditSinkWebhookEnable.state = (bridge.configGet(key: "audit-sink-webhook-enabled") ?? "false") == "true" ? .on : .off
+        auditSinkWebhookUrlField.stringValue = bridge.configGet(key: "audit-sink-webhook-url") ?? ""
+        auditSinkWebhookSeverityPopup.selectItem(withTitle:
+            (bridge.configGet(key: "audit-sink-webhook-min-severity") ?? "info").capitalized)
+
+        // Phase 6: enterprise sink defaults.
+        auditSinkS3Enable.state = (bridge.configGet(key: "audit-sink-s3-enabled") ?? "false") == "true" ? .on : .off
+        auditSinkS3BucketField.stringValue = bridge.configGet(key: "audit-sink-s3-bucket") ?? ""
+        auditSinkS3SeverityPopup.selectItem(withTitle:
+            (bridge.configGet(key: "audit-sink-s3-min-severity") ?? "info").capitalized)
+        auditSinkSplunkEnable.state = (bridge.configGet(key: "audit-sink-splunk-enabled") ?? "false") == "true" ? .on : .off
+        auditSinkSplunkUrlField.stringValue = bridge.configGet(key: "audit-sink-splunk-url") ?? ""
+        auditSinkSplunkSeverityPopup.selectItem(withTitle:
+            (bridge.configGet(key: "audit-sink-splunk-min-severity") ?? "info").capitalized)
+        auditSinkDatadogEnable.state = (bridge.configGet(key: "audit-sink-datadog-enabled") ?? "false") == "true" ? .on : .off
+        auditSinkDatadogRegionPopup.selectItem(withTitle:
+            bridge.configGet(key: "audit-sink-datadog-region") ?? "us")
+        auditSinkDatadogSeverityPopup.selectItem(withTitle:
+            (bridge.configGet(key: "audit-sink-datadog-min-severity") ?? "info").capitalized)
 
         let queueMode = bridge.configGet(key: "queue-mode") ?? "automatic"
         queueModePopup.selectItem(withTitle: queueMode.capitalized)
@@ -441,12 +690,143 @@ final class SettingsPanel: NSView, ReloadablePanel {
         bridge.configSet(key: "sensitive-data-policy", value: policy)
     }
 
+    @objc private func auditRedactionChanged() {
+        let value: String
+        switch auditRedactionPopup.indexOfSelectedItem {
+        case 0: value = "none"
+        case 2: value = "strict"
+        default: value = "redact"
+        }
+        bridge.configSet(key: "audit-redaction-policy", value: value)
+    }
+
     @objc private func auditCodeSessionsChanged() {
         bridge.configSet(key: "audit-claude-code-sessions", value: auditCodeSessionsSwitch.state == .on ? "true" : "false")
     }
 
     @objc private func auditAppChatsChanged() {
         bridge.configSet(key: "audit-claude-app-chats", value: auditAppChatsSwitch.state == .on ? "true" : "false")
+    }
+
+    @objc private func auditQueuePromptsChanged() {
+        bridge.configSet(key: "audit-queue-prompts", value: auditQueuePromptsSwitch.state == .on ? "true" : "false")
+    }
+
+    @objc private func auditAllowClearChanged() {
+        bridge.configSet(key: "audit-allow-clear", value: auditAllowClearSwitch.state == .on ? "true" : "false")
+    }
+
+    // Phase 5: audit sink controls.
+
+    @objc private func auditSinkSyslogEnableChanged() {
+        let on = auditSinkSyslogEnable.state == .on
+        bridge.configSet(key: "audit-sink-syslog-enabled", value: on ? "true" : "false")
+    }
+
+    @objc private func auditSinkSyslogSeverityChanged() {
+        guard let sev = auditSinkSyslogSeverityPopup.titleOfSelectedItem?.lowercased() else { return }
+        bridge.configSet(key: "audit-sink-syslog-min-severity", value: sev)
+    }
+
+    @objc private func auditSinkSyslogTestClicked() {
+        bridge.logAuditEvent(
+            workspaceId: "",
+            eventType: "AuditSinkTest",
+            severity: .info,
+            description: "Synthetic test event for sink 'syslog'",
+            metadata: ["sink": "syslog"]
+        )
+    }
+
+    @objc private func auditSinkWebhookEnableChanged() {
+        let on = auditSinkWebhookEnable.state == .on
+        bridge.configSet(key: "audit-sink-webhook-enabled", value: on ? "true" : "false")
+    }
+
+    @objc private func auditSinkWebhookSeverityChanged() {
+        guard let sev = auditSinkWebhookSeverityPopup.titleOfSelectedItem?.lowercased() else { return }
+        bridge.configSet(key: "audit-sink-webhook-min-severity", value: sev)
+    }
+
+    @objc private func auditSinkWebhookTestClicked() {
+        bridge.logAuditEvent(
+            workspaceId: "",
+            eventType: "AuditSinkTest",
+            severity: .info,
+            description: "Synthetic test event for sink 'webhook'",
+            metadata: ["sink": "webhook"]
+        )
+    }
+
+    // Phase 6: S3.
+
+    @objc private func auditSinkS3EnableChanged() {
+        let on = auditSinkS3Enable.state == .on
+        bridge.configSet(key: "audit-sink-s3-enabled", value: on ? "true" : "false")
+    }
+
+    @objc private func auditSinkS3SeverityChanged() {
+        guard let sev = auditSinkS3SeverityPopup.titleOfSelectedItem?.lowercased() else { return }
+        bridge.configSet(key: "audit-sink-s3-min-severity", value: sev)
+    }
+
+    @objc private func auditSinkS3TestClicked() {
+        bridge.logAuditEvent(
+            workspaceId: "",
+            eventType: "AuditSinkTest",
+            severity: .info,
+            description: "Synthetic test event for sink 's3'",
+            metadata: ["sink": "s3"]
+        )
+    }
+
+    // Phase 6: Splunk HEC.
+
+    @objc private func auditSinkSplunkEnableChanged() {
+        let on = auditSinkSplunkEnable.state == .on
+        bridge.configSet(key: "audit-sink-splunk-enabled", value: on ? "true" : "false")
+    }
+
+    @objc private func auditSinkSplunkSeverityChanged() {
+        guard let sev = auditSinkSplunkSeverityPopup.titleOfSelectedItem?.lowercased() else { return }
+        bridge.configSet(key: "audit-sink-splunk-min-severity", value: sev)
+    }
+
+    @objc private func auditSinkSplunkTestClicked() {
+        bridge.logAuditEvent(
+            workspaceId: "",
+            eventType: "AuditSinkTest",
+            severity: .info,
+            description: "Synthetic test event for sink 'splunk'",
+            metadata: ["sink": "splunk"]
+        )
+    }
+
+    // Phase 6: Datadog Logs.
+
+    @objc private func auditSinkDatadogEnableChanged() {
+        let on = auditSinkDatadogEnable.state == .on
+        bridge.configSet(key: "audit-sink-datadog-enabled", value: on ? "true" : "false")
+    }
+
+    @objc private func auditSinkDatadogRegionChanged() {
+        guard let region = auditSinkDatadogRegionPopup.titleOfSelectedItem else { return }
+        bridge.configSet(key: "audit-sink-datadog-region", value: region)
+    }
+
+    @objc private func auditSinkDatadogSeverityChanged() {
+        guard let sev = auditSinkDatadogSeverityPopup.titleOfSelectedItem?.lowercased() else { return }
+        bridge.configSet(key: "audit-sink-datadog-min-severity", value: sev)
+    }
+
+    @objc private func auditSinkDatadogTestClicked() {
+        bridge.logAuditEvent(
+            workspaceId: "",
+            eventType: "AuditSinkTest",
+            severity: .info,
+            description: "Synthetic test event for sink 'datadog'",
+            metadata: ["sink": "datadog"]
+        )
     }
 
     @objc private func costScopeChanged() {
@@ -500,6 +880,32 @@ extension SettingsPanel: NSTextFieldDelegate {
             } else if let value = Double(text), value > 0 {
                 bridge.configSet(key: "enterprise-monthly-cost", value: String(format: "%.2f", value))
             }
+        } else if field === auditRetentionField {
+            let text = field.stringValue.trimmingCharacters(in: .whitespaces)
+            // Reject non-numeric input by reverting to the persisted value.
+            if let days = UInt32(text) {
+                bridge.configSet(key: "audit-retention-days", value: "\(days)")
+            } else {
+                field.stringValue = bridge.configGet(key: "audit-retention-days") ?? "90"
+            }
+        } else if field === auditSinkSyslogHostField {
+            let raw = field.stringValue.trimmingCharacters(in: .whitespaces)
+            // Accept either "host" or "host:port". Persist the two keys
+            // separately so the Rust side keeps reading them through the same
+            // config accessors.
+            let parts = raw.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            if parts.count == 2, let port = UInt16(parts[1]) {
+                bridge.configSet(key: "audit-sink-syslog-host", value: String(parts[0]))
+                bridge.configSet(key: "audit-sink-syslog-port", value: "\(port)")
+            } else {
+                bridge.configSet(key: "audit-sink-syslog-host", value: raw)
+            }
+        } else if field === auditSinkWebhookUrlField {
+            bridge.configSet(key: "audit-sink-webhook-url", value: field.stringValue.trimmingCharacters(in: .whitespaces))
+        } else if field === auditSinkS3BucketField {
+            bridge.configSet(key: "audit-sink-s3-bucket", value: field.stringValue.trimmingCharacters(in: .whitespaces))
+        } else if field === auditSinkSplunkUrlField {
+            bridge.configSet(key: "audit-sink-splunk-url", value: field.stringValue.trimmingCharacters(in: .whitespaces))
         }
     }
 }

@@ -28,7 +28,7 @@ Focus: production readiness, macOS parity, and contributor experience.
 
 - [ ] macOS feature parity with Linux
 - [ ] Plugin / extension system (Lua or WASM)
-- [ ] External log shipping (syslog, JSON file, webhook)
+- [x] External log shipping (syslog, webhook, **S3, Splunk HEC, Datadog Logs**) — see [AUDIT_LOG.md](AUDIT_LOG.md)
 - [ ] Per-command sandbox restrictions (in addition to per-workspace)
 - [ ] Workspace templates (pre-configured sandbox + config)
 - [ ] Tab completion for thane-cli

@@ -41,6 +41,9 @@ let package = Package(
                 ]),
                 .linkedFramework("AppKit"),
                 .linkedFramework("WebKit"),
+                // Required by the `whoami` crate (resolves the OS username for
+                // audit attribution via SCDynamicStoreCopyComputerName).
+                .linkedFramework("SystemConfiguration"),
             ]
         ),
         .testTarget(

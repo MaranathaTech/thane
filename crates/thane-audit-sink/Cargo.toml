@@ -1,0 +1,55 @@
+[package]
+name = "thane-audit-sink"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "External audit-log sinks (syslog, webhook, ...) for thane"
+
+[dependencies]
+thane-core.workspace = true
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = "0.1"
+tracing = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+hex = { workspace = true }
+whoami = "1"
+
+# Syslog sink (RFC 5424 over TCP, optional TLS).
+tokio-rustls = { version = "0.26", optional = true }
+rustls = { version = "0.23", optional = true }
+rustls-pemfile = { version = "2", optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+webpki-roots = { version = "0.26", optional = true }
+
+# Webhook sink (HTTPS POST + HMAC). The HTTP client is shared with the
+# Splunk and Datadog sinks below.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
+hmac = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
+
+# S3 / object-storage sink.
+aws-config = { version = "1", default-features = false, features = ["rustls", "rt-tokio"], optional = true }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rustls", "rt-tokio"], optional = true }
+flate2 = { version = "1", optional = true }
+
+# Loki sink (HTTPS push + Bearer/Basic/mTLS auth + optional gzip).
+base64 = { workspace = true, optional = true }
+
+[features]
+default = ["syslog", "webhook"]
+syslog = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile", "dep:rustls-native-certs", "dep:webpki-roots"]
+webhook = ["dep:reqwest", "dep:hmac", "dep:sha2"]
+splunk = ["dep:reqwest"]
+datadog = ["dep:reqwest"]
+s3 = ["dep:aws-config", "dep:aws-sdk-s3", "dep:flate2"]
+loki = ["dep:reqwest", "dep:flate2", "dep:base64"]
+# Convenience: enable every shippable sink at once.
+all-sinks = ["syslog", "webhook", "splunk", "datadog", "s3", "loki"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile = "3"

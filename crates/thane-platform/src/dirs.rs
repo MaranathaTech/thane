@@ -51,6 +51,12 @@ impl LinuxDirs {
         self.data_dir().join("plans")
     }
 
+    /// Enterprise policy file path. Root-owned, deployed via configuration
+    /// management (Ansible, Puppet, etc.). See `thane-core::policy`.
+    pub fn policy_file_path(&self) -> PathBuf {
+        PathBuf::from(format!("/etc/{APP_NAME}/policy.json"))
+    }
+
     /// Ensure all required directories exist.
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(self.config_dir())?;

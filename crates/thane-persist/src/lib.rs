@@ -1,3 +1,4 @@
+pub mod audit_crypto;
 pub mod audit_store;
 pub mod history_store;
 pub mod policy;

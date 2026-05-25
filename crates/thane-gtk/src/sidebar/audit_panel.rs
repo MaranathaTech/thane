@@ -59,7 +59,6 @@ impl DateRange {
 pub struct AuditPanel {
     container: gtk4::Box,
     list_box: gtk4::ListBox,
-    header: gtk4::Box,
     filter_box: gtk4::Box,
     search_entry: gtk4::SearchEntry,
     severity_filter: std::cell::Cell<Option<AuditSeverity>>,
@@ -67,9 +66,20 @@ pub struct AuditPanel {
     date_range: std::cell::Cell<DateRange>,
     /// Current search text (lowercased). Shared with the search callback.
     search_text: RefCell<String>,
+    clear_btn: gtk4::Button,
     export_btn: gtk4::Button,
+    verify_btn: gtk4::Button,
     close_btn: gtk4::Button,
     date_range_dropdown: gtk4::DropDown,
+    retention_label: gtk4::Label,
+    /// Lock icon shown next to the title when at-rest encryption is enabled.
+    encryption_icon: gtk4::Image,
+    /// Phase 5: row of small clickable pills, one per configured external sink.
+    /// Populated via [`set_sink_status`] from the `audit.sink_status` RPC.
+    sink_pills_box: gtk4::Box,
+    /// Phase 6b: persistent banner shown when an enterprise policy is active.
+    /// Populated via [`set_enterprise_policy_banner`]; hidden by default.
+    policy_banner: gtk4::Label,
     /// Callback invoked when a row is double-clicked.
     row_activated: Rc<RefCell<Option<Box<dyn Fn(AuditEvent)>>>>,
 }
@@ -95,9 +105,24 @@ impl AuditPanel {
 
         let title = gtk4::Label::new(Some("Audit Trail"));
         title.add_css_class("workspace-title");
-        title.set_hexpand(true);
         title.set_halign(gtk4::Align::Start);
         header.append(&title);
+
+        // Phase 4: at-rest encryption indicator. Shown when
+        // `audit-encryption-enabled = true` (the default). The icon shares the
+        // header line with the title; its tooltip names the key-store backend
+        // so an operator knows where the AES key lives. Updated post-construction
+        // via [`set_encryption_indicator`].
+        let lock_icon = gtk4::Image::from_icon_name("changes-prevent-symbolic");
+        lock_icon.add_css_class("dim-label");
+        lock_icon.set_visible(false);
+        lock_icon.set_pixel_size(12);
+        header.append(&lock_icon);
+
+        // Spacer expands so the action buttons stay right-aligned.
+        let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        spacer.set_hexpand(true);
+        header.append(&spacer);
 
         let clear_btn = gtk4::Button::with_label("Clear");
         clear_btn.add_css_class("flat");
@@ -108,12 +133,42 @@ impl AuditPanel {
         export_btn.set_tooltip_text(Some("Export audit log as JSON"));
         header.append(&export_btn);
 
+        let verify_btn = gtk4::Button::with_label("Verify");
+        verify_btn.add_css_class("flat");
+        verify_btn.set_tooltip_text(Some(
+            "Verify the cryptographic integrity of the audit log (HMAC + chain)",
+        ));
+        header.append(&verify_btn);
+
         let close_btn = gtk4::Button::from_icon_name("window-close-symbolic");
         close_btn.add_css_class("flat");
         close_btn.set_tooltip_text(Some("Close"));
         header.append(&close_btn);
 
         container.append(&header);
+
+        // Phase 6b: enterprise-policy banner. Hidden until the bridge tells us
+        // a policy is active. Text comes from `policy.ui_banner` and falls
+        // back to a default rendered from `issued_by` + retention/redaction
+        // policy when the issuer doesn't supply one.
+        let policy_banner = gtk4::Label::new(None);
+        policy_banner.add_css_class("audit-policy-banner");
+        policy_banner.set_wrap(true);
+        policy_banner.set_xalign(0.0);
+        policy_banner.set_margin_start(12);
+        policy_banner.set_margin_end(12);
+        policy_banner.set_margin_bottom(4);
+        policy_banner.set_visible(false);
+        container.append(&policy_banner);
+
+        // Phase 5: per-sink status pills row (initially empty/hidden).
+        // Populated via `set_sink_status` from the `audit.sink_status` RPC.
+        let sink_pills_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+        sink_pills_box.set_margin_start(12);
+        sink_pills_box.set_margin_end(12);
+        sink_pills_box.set_margin_bottom(4);
+        sink_pills_box.set_visible(false);
+        container.append(&sink_pills_box);
 
         // Filter buttons row.
         let filter_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
@@ -167,8 +222,9 @@ impl AuditPanel {
         search_entry.set_margin_bottom(4);
         container.append(&search_entry);
 
-        // Retention hint label.
-        let retention_label = gtk4::Label::new(Some("Logs retained for 7 days"));
+        // Retention hint label. Text is reset by `set_retention_days` so it stays in
+        // sync with the configured `audit-retention-days`.
+        let retention_label = gtk4::Label::new(Some("Logs retained for 90 days"));
         retention_label.add_css_class("dim-label");
         retention_label.set_halign(gtk4::Align::Start);
         retention_label.set_margin_start(12);
@@ -193,17 +249,133 @@ impl AuditPanel {
         Self {
             container,
             list_box,
-            header,
             filter_box,
             search_entry,
             severity_filter: std::cell::Cell::new(None),
             date_range: std::cell::Cell::new(DateRange::All),
             search_text: RefCell::new(String::new()),
+            clear_btn,
             export_btn,
+            verify_btn,
             close_btn,
             date_range_dropdown,
+            retention_label,
+            encryption_icon: lock_icon,
+            sink_pills_box,
+            policy_banner,
             row_activated: Rc::new(RefCell::new(None)),
         }
+    }
+
+    /// Show the enterprise-policy banner. The bridge layer determines the
+    /// text — typically the policy's `ui_banner` field, falling back to a
+    /// rendered "Logs shipping to <issuer>'s Grafana via Loki" string.
+    /// Pass an empty string (or call `clear_enterprise_policy_banner`) to
+    /// hide the banner.
+    pub fn set_enterprise_policy_banner(&self, text: &str) {
+        if text.is_empty() {
+            self.policy_banner.set_visible(false);
+            self.policy_banner.set_text("");
+        } else {
+            self.policy_banner.set_text(text);
+            self.policy_banner.set_visible(true);
+        }
+    }
+
+    /// Hide the enterprise-policy banner. Equivalent to passing an empty
+    /// string to [`set_enterprise_policy_banner`].
+    pub fn clear_enterprise_policy_banner(&self) {
+        self.set_enterprise_policy_banner("");
+    }
+
+    /// Render one pill per external sink reported by `audit.sink_status`.
+    ///
+    /// `report` is the parsed JSON value as returned by the RPC. We accept a
+    /// generic Value so the panel never has to take a build-time dependency
+    /// on `thane_audit_sink` types. The expected shape is
+    /// `{ "sinks": [ { "name", "status", "queued", "sent_total", "dlq_total",
+    ///                  "last_success", "last_error" }, ... ] }`.
+    ///
+    /// Click a pill → pops a modal with the full sink stats.
+    pub fn set_sink_status(&self, report: &serde_json::Value, parent_window: gtk4::Window) {
+        // Clear existing pills.
+        while let Some(child) = self.sink_pills_box.first_child() {
+            self.sink_pills_box.remove(&child);
+        }
+        let Some(sinks) = report.get("sinks").and_then(|v| v.as_array()) else {
+            self.sink_pills_box.set_visible(false);
+            return;
+        };
+        if sinks.is_empty() {
+            self.sink_pills_box.set_visible(false);
+            return;
+        }
+
+        let label = gtk4::Label::new(Some("Sinks:"));
+        label.add_css_class("dim-label");
+        self.sink_pills_box.append(&label);
+
+        for sink in sinks {
+            let name = sink.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            let status = sink.get("status").and_then(|v| v.as_str()).unwrap_or("healthy");
+            let pill = gtk4::Button::with_label(name);
+            pill.add_css_class("flat");
+            pill.add_css_class("audit-sink-pill");
+            pill.add_css_class(match status {
+                "failing" => "audit-sink-pill-failing",
+                "degraded" => "audit-sink-pill-degraded",
+                _ => "audit-sink-pill-healthy",
+            });
+            let queued = sink.get("queued").and_then(|v| v.as_u64()).unwrap_or(0);
+            let sent = sink.get("sent_total").and_then(|v| v.as_u64()).unwrap_or(0);
+            let dlq = sink.get("dlq_total").and_then(|v| v.as_u64()).unwrap_or(0);
+            pill.set_tooltip_text(Some(&format!(
+                "{name}: {status} — queued {queued}, sent {sent}, DLQ {dlq}",
+            )));
+
+            let sink_clone = sink.clone();
+            let window_clone = parent_window.clone();
+            pill.connect_clicked(move |_| {
+                show_sink_detail_dialog(&window_clone, &sink_clone);
+            });
+            self.sink_pills_box.append(&pill);
+        }
+
+        self.sink_pills_box.set_visible(true);
+    }
+
+    /// Toggle the at-rest encryption lock icon next to the panel title.
+    ///
+    /// `backend_name` populates the tooltip so operators can see which platform
+    /// secret store holds the AES key (e.g. "Secret Service / local fallback"
+    /// on Linux).
+    pub fn set_encryption_indicator(&self, enabled: bool, backend_name: &str) {
+        self.encryption_icon.set_visible(enabled);
+        if enabled {
+            self.encryption_icon.set_tooltip_text(Some(&format!(
+                "Audit logs encrypted at rest (AES-256-GCM). Key stored in {backend_name}.",
+            )));
+        } else {
+            self.encryption_icon.set_tooltip_text(None);
+        }
+    }
+
+    /// Show or hide the Clear button. Disabled by default because clearing
+    /// audit history violates most enterprise compliance defaults.
+    pub fn set_clear_visible(&self, visible: bool) {
+        self.clear_btn.set_visible(visible);
+    }
+
+    /// Set the retention label text to reflect the configured policy.
+    ///
+    /// `days == 0` is the "retain forever" sentinel and renders as such.
+    pub fn set_retention_days(&self, days: u32) {
+        let text = if days == 0 {
+            "Logs retained indefinitely".to_string()
+        } else {
+            format!("Logs retained for {days} days")
+        };
+        self.retention_label.set_text(&text);
     }
 
     pub fn widget(&self) -> &gtk4::Box {
@@ -315,24 +487,17 @@ impl AuditPanel {
 
     /// Connect the clear button callback.
     pub fn connect_clear<F: Fn() + 'static>(&self, f: F) {
-        // Clear button is the second-to-last child of the header (before close_btn).
-        let mut child = self.header.first_child();
-        while let Some(widget) = child {
-            let next = widget.next_sibling();
-            if let Ok(button) = widget.clone().downcast::<gtk4::Button>() {
-                // The clear button has label "Clear", not an icon.
-                if button.label().is_some_and(|l| l == "Clear") {
-                    button.connect_clicked(move |_| f());
-                    break;
-                }
-            }
-            child = next;
-        }
+        self.clear_btn.connect_clicked(move |_| f());
     }
 
     /// Connect the export button callback.
     pub fn connect_export<F: Fn() + 'static>(&self, f: F) {
         self.export_btn.connect_clicked(move |_| f());
+    }
+
+    /// Connect the verify-integrity button callback.
+    pub fn connect_verify<F: Fn() + 'static>(&self, f: F) {
+        self.verify_btn.connect_clicked(move |_| f());
     }
 
     /// Connect the close button callback.
@@ -384,6 +549,20 @@ impl AuditPanel {
     }
 }
 
+/// Whether any of an event's free-form fields shows the `[REDACTED:` marker
+/// stamped on by [`thane_core::audit_redaction::redact_string`].
+///
+/// We do NOT try to detect Strict-policy events here — once description and
+/// metadata are stripped, there is nothing left to attribute to redaction
+/// versus a plain low-content event. The Redact policy carries the marker
+/// inline, which is the case we can recognise.
+fn event_has_redaction(event: &AuditEvent) -> bool {
+    if event.description.contains("[REDACTED:") {
+        return true;
+    }
+    event.metadata.to_string().contains("[REDACTED:")
+}
+
 /// Create a single audit event row widget with double-click gesture.
 fn create_audit_row(
     event: &AuditEvent,
@@ -426,6 +605,18 @@ fn create_audit_row(
     ));
     time.add_css_class("notification-time");
     top_row.append(&time);
+
+    // Small "[redacted]" badge when any field shows a redaction marker.
+    if event_has_redaction(event) {
+        let badge = gtk4::Label::new(Some("[redacted]"));
+        badge.add_css_class("audit-redacted-badge");
+        badge.add_css_class("dim-label");
+        badge.set_tooltip_text(Some(
+            "Free-form content was scrubbed before this event was stored. \
+             Adjust under Settings → Audit Redaction Policy.",
+        ));
+        top_row.append(&badge);
+    }
 
     row.append(&top_row);
 
@@ -576,6 +767,71 @@ pub fn show_audit_detail_dialog(parent: &gtk4::ApplicationWindow, event: &AuditE
     dialog.present();
 }
 
+/// Modal showing a single sink's runtime stats (Phase 5).
+///
+/// Pops over the audit panel when an operator clicks one of the sink status
+/// pills. Renders each known field as a label; missing fields are skipped so
+/// new schema additions show up automatically.
+pub fn show_sink_detail_dialog(parent: &gtk4::Window, sink: &serde_json::Value) {
+    let name = sink.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+    let title = format!("Audit Sink: {name}");
+
+    let dialog = gtk4::Window::new();
+    dialog.set_title(Some(&title));
+    dialog.set_transient_for(Some(parent));
+    dialog.set_modal(true);
+    dialog.set_default_size(420, 320);
+
+    let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+    vbox.set_margin_top(16);
+    vbox.set_margin_bottom(16);
+    vbox.set_margin_start(16);
+    vbox.set_margin_end(16);
+    dialog.set_child(Some(&vbox));
+
+    let fields: &[(&str, &str)] = &[
+        ("Status",       "status"),
+        ("Enabled",      "enabled"),
+        ("Queued",       "queued"),
+        ("Sent total",   "sent_total"),
+        ("DLQ total",    "dlq_total"),
+        ("Last success", "last_success"),
+        ("Last error",   "last_error"),
+    ];
+    for (label, key) in fields {
+        let Some(val) = sink.get(*key) else { continue };
+        let display = match val {
+            serde_json::Value::Null => "—".to_string(),
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            other => other.to_string(),
+        };
+        let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let key_lbl = gtk4::Label::new(Some(*label));
+        key_lbl.add_css_class("audit-detail-field-label");
+        key_lbl.set_halign(gtk4::Align::Start);
+        key_lbl.set_width_chars(14);
+        let val_lbl = gtk4::Label::new(Some(&display));
+        val_lbl.set_halign(gtk4::Align::Start);
+        val_lbl.set_selectable(true);
+        val_lbl.set_wrap(true);
+        val_lbl.set_hexpand(true);
+        row.append(&key_lbl);
+        row.append(&val_lbl);
+        vbox.append(&row);
+    }
+
+    let close_btn = gtk4::Button::with_label("Close");
+    close_btn.set_halign(gtk4::Align::End);
+    let dialog_ref = dialog.downgrade();
+    close_btn.connect_clicked(move |_| {
+        if let Some(d) = dialog_ref.upgrade() { d.close(); }
+    });
+    vbox.append(&close_btn);
+
+    dialog.present();
+}
+
 fn severity_text(severity: AuditSeverity) -> &'static str {
     match severity {
         AuditSeverity::Info => "INFO",
@@ -613,7 +869,10 @@ mod tests {
             description: format!("event {} days ago", days_ago),
             metadata: serde_json::json!({}),
             agent_name: agent_name.map(|s| s.to_string()),
+            system_user: None,
+            system_uid: None,
             prev_hash: String::new(),
+            hmac: None,
         }
     }
 

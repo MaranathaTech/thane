@@ -13,6 +13,7 @@ thane-browser = { workspace = true, features = ["webkit-backend"] }
 thane-rpc.workspace = true
 thane-ipc.workspace = true
 thane-persist.workspace = true
+thane-audit-sink = { workspace = true, features = ["all-sinks"] }
 gtk4.workspace = true
 glib.workspace = true
 gio.workspace = true

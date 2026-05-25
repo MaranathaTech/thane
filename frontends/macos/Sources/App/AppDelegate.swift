@@ -23,6 +23,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastConfigMtime: Date?
     private var lockFileDescriptor: Int32 = -1
 
+    /// Set to true when an external `thane-daemon` already owns the IPC socket;
+    /// in that case the GUI must not start its own IPC server or run the
+    /// in-process queue executor — both responsibilities belong to the daemon.
+    private var daemonHandlesIpc = false
+
     /// The currently running queue task process, if any.
     var runningQueueProcess: Process?
     /// The entry ID of the currently running queue task.
@@ -120,11 +125,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Restore previous session
         restoreSession()
 
-        // Start the IPC server for CLI access
-        do {
-            try bridge.startIpcServer()
-        } catch {
-            NSLog("thane: failed to start IPC server: \(error)")
+        // Set up the daemon (LaunchAgent + spawn-if-missing) before starting
+        // our own IPC server. If a daemon is already serving the socket, we
+        // skip the in-process server entirely — sharing a socket would only
+        // produce EADDRINUSE noise.
+        setUpDaemonIfNeeded()
+
+        if daemonHandlesIpc {
+            NSLog("thane: external daemon owns the IPC socket; skipping in-process IPC server")
+        } else {
+            do {
+                try bridge.startIpcServer()
+            } catch {
+                NSLog("thane: failed to start IPC server: \(error)")
+            }
         }
 
         // Run startup checks (dependency verification, CLAUDE.md injection)
@@ -142,9 +156,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try? self?.bridge.saveSession()
         }
 
-        // Poll running queue tasks every 2 seconds (matching Linux)
-        queuePollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.pollQueueProcess()
+        // Poll running queue tasks every 2 seconds (matching Linux).
+        // When the daemon owns IPC it is also responsible for the queue executor,
+        // so the GUI must not race the daemon for the same tasks.
+        if !daemonHandlesIpc {
+            queuePollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+                self?.pollQueueProcess()
+            }
         }
 
         // Check config file for changes every 5 seconds (hot-reload)
@@ -194,7 +212,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("thane: failed to save session: \(error)")
         }
 
-        bridge.stopIpcServer()
+        if !daemonHandlesIpc {
+            bridge.stopIpcServer()
+        }
 
         releaseSingleInstanceLock()
 
@@ -264,7 +284,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func pollQueueProcess() {
         // Check if a running process has finished
         if let process = runningQueueProcess, let entryId = runningQueueEntryId {
+            // If the entry was cancelled while running, terminate the subprocess.
+            let currentStatus = bridge.queueStatus(entryId: entryId)?.status
+            if currentStatus == .cancelled && process.isRunning {
+                NSLog("thane: terminating cancelled queue process for \(entryId)")
+                process.terminate()
+                // Process will be reaped by the next poll iteration (≤2s).
+                return
+            }
+
             guard !process.isRunning else { return }
+
+            // If the user cancelled while the process was running, respect that status
+            // instead of overwriting with .failed when the terminated process reports
+            // a non-zero exit code.
+            if currentStatus == .cancelled {
+                NSLog("thane: queue process for \(entryId) terminated due to user cancel")
+                runningQueueProcess = nil
+                runningQueueEntryId = nil
+                runningQueueStdoutPipe = nil
+                runningQueueStderrPipe = nil
+                bridge.delegate?.queueEntryCompleted(entryId: entryId, success: false)
+                return
+            }
 
             let success = process.terminationStatus == 0
             let exitCode = process.terminationStatus
@@ -400,11 +442,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Spawn the process — use sandbox wrapper if setting is enabled and workspace has a sandbox policy
         let process = Process()
-        let searchPaths = [
-            "/usr/local/bin/claude",
-            "/opt/homebrew/bin/claude",
-        ]
-        let claudePath = searchPaths.first { fm.fileExists(atPath: $0) } ?? "claude"
+        let claudePath = Self.resolveClaudeBinary(fm: fm, bridge: bridge)
 
         // Check queue-level sandbox
         let queueSandbox = bridge.queueSandboxStatus()
@@ -435,6 +473,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             args.append(contentsOf: autonomousArgs)
             process.arguments = args
             var env = ProcessInfo.processInfo.environment
+            env["PATH"] = Self.augmentedPath(existing: env["PATH"])
             env["THANE_SANDBOX"] = "1"
             env["THANE_SANDBOX_ROOT"] = policy.rootDir
             if policy.enforcement == .strict {
@@ -452,6 +491,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 process.arguments = ["claude"] + autonomousArgs
             }
             var env = ProcessInfo.processInfo.environment
+            env["PATH"] = Self.augmentedPath(existing: env["PATH"])
             env["THANE_QUEUE_ENTRY_ID"] = entryId
             process.environment = env
         }
@@ -469,6 +509,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                         "sandboxed": "\(isSandboxed)",
                                         "cwd": effectiveCwd.path,
                                         "content_preview": String(entry.content.prefix(200))])
+
+        // Symmetry with interactive Claude Code sessions: capture the full prompt as
+        // a UserPrompt event right after QueueTaskStarted. Gated by `audit-queue-prompts`
+        // (default true). Failures here must never block task execution.
+        let auditPromptsRaw = bridge.configGet(key: "audit-queue-prompts")
+        let auditPrompts = (auditPromptsRaw?.lowercased() ?? "true") != "false"
+        if auditPrompts {
+            bridge.logAuditEvent(workspaceId: entryWsId, eventType: "UserPrompt", severity: .info,
+                                 description: "Queue task prompt: \(entryId)",
+                                 metadata: ["entry_id": entryId,
+                                            "prompt": entry.content,
+                                            "source": "queue_executor"],
+                                 agentName: "claude")
+        }
 
         // Pipe stdin with the task content
         let stdinPipe = Pipe()
@@ -841,12 +895,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var claudeInstalled: Bool = false
 
     private func runStartupChecks() {
-        checkAndPromptCliInstall()
+        installCLITools()
         checkClaudeInstalled()
     }
-
-    /// UserDefaults key set when the user clicks "Don't Ask Again" in the CLI install prompt.
-    private static let skipCliPromptKey = "thane.cli.skipInstallPrompt"
 
     // MARK: - Update Check
 
@@ -941,107 +992,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
-    /// On launch, verify thane-cli is reachable on PATH and prompt the user to
-    /// install a symlink if it isn't. Skipped when running from a non-stable
-    /// bundle location (dev builds) or when the user has opted out.
-    private func checkAndPromptCliInstall() {
-        let bundlePath = Bundle.main.bundlePath
-        guard CliInstallChecker.isStableBundleLocation(bundlePath: bundlePath) else {
-            NSLog("thane: skipping CLI install check — bundle not in /Applications")
-            return
-        }
-
+    /// Symlink bundled CLI tools to /usr/local/bin so they're available in terminals.
+    private func installCLITools() {
         let fm = FileManager.default
-        let home = fm.homeDirectoryForCurrentUser.path
-        let status = CliInstallChecker.check(
-            bundlePath: bundlePath,
-            candidates: CliInstallChecker.defaultCandidates(home: home),
-            fileExists: { fm.fileExists(atPath: $0) },
-            resolveSymlink: { try? fm.destinationOfSymbolicLink(atPath: $0) }
-        )
+        let bundleBin = Bundle.main.bundlePath + "/Contents/MacOS"
+        let installDir = "/usr/local/bin"
 
-        switch status {
-        case .installed(let path):
-            NSLog("thane: thane-cli already on PATH at \(path)")
-        case .stale(let foundAt, let pointsAt):
-            NSLog("thane: stale thane-cli at \(foundAt) points at \(pointsAt), will prompt to reinstall")
-            promptCliInstall(isReinstall: true)
-        case .notInstalled:
-            promptCliInstall(isReinstall: false)
-        }
-    }
-
-    /// Show the install prompt unless the user has permanently dismissed it.
-    private func promptCliInstall(isReinstall: Bool) {
-        if UserDefaults.standard.bool(forKey: Self.skipCliPromptKey) {
-            NSLog("thane: CLI install prompt skipped (user opted out)")
+        // Ensure /usr/local/bin exists
+        if !fm.fileExists(atPath: installDir) {
+            NSLog("thane: /usr/local/bin does not exist, skipping CLI install")
             return
         }
 
-        let alert = NSAlert()
-        alert.messageText = isReinstall ? "Update thane-cli?" : "Install thane-cli?"
-        alert.informativeText = isReinstall
-            ? "A thane-cli symlink on your PATH points to an older install. Update it to point at this app?"
-            : "The thane-cli command-line tool lets you control thane from any terminal (e.g., submit queue tasks, list workspaces).\n\nInstall a symlink at /usr/local/bin/thane-cli?"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Install")
-        alert.addButton(withTitle: "Not Now")
-        alert.addButton(withTitle: "Don't Ask Again")
+        for tool in ["thane-cli"] {
+            let src = "\(bundleBin)/\(tool)"
+            let dst = "\(installDir)/\(tool)"
 
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            installCliSymlink()
-        case .alertThirdButtonReturn:
-            UserDefaults.standard.set(true, forKey: Self.skipCliPromptKey)
-            NSLog("thane: user opted out of CLI install prompt")
-        default:
-            break
-        }
-    }
-
-    /// Create /usr/local/bin/thane-cli pointing at this bundle's thane-cli,
-    /// prompting for admin credentials via osascript.
-    private func installCliSymlink() {
-        let src = CliInstallChecker.expectedSource(bundlePath: Bundle.main.bundlePath)
-        let dst = "/usr/local/bin/thane-cli"
-
-        guard FileManager.default.fileExists(atPath: src) else {
-            NSLog("thane: thane-cli not found in app bundle at \(src)")
-            showSetupAlert(title: "Install failed",
-                           message: "thane-cli is not bundled with this app.")
-            return
-        }
-
-        let script = "do shell script \"mkdir -p /usr/local/bin && ln -sf '\(src)' '\(dst)'\" with administrator privileges"
-        guard let appleScript = NSAppleScript(source: script) else {
-            NSLog("thane: failed to build AppleScript for install")
-            return
-        }
-
-        var errorDict: NSDictionary?
-        appleScript.executeAndReturnError(&errorDict)
-        if let err = errorDict {
-            // User cancel is code -128; don't show a scary error for that.
-            let code = (err[NSAppleScript.errorNumber] as? Int) ?? 0
-            if code == -128 {
-                NSLog("thane: user cancelled CLI install admin prompt")
-                return
+            guard fm.fileExists(atPath: src) else {
+                NSLog("thane: \(tool) not found in app bundle, skipping")
+                continue
             }
-            NSLog("thane: CLI install failed: \(err)")
-            showSetupAlert(
-                title: "Install failed",
-                message: "Could not install thane-cli.\n\nYou can run this manually in Terminal:\n  sudo ln -sf \(src) \(dst)"
-            )
-            return
-        }
 
-        NSLog("thane: thane-cli installed at \(dst)")
-        let alert = NSAlert()
-        alert.messageText = "thane-cli installed"
-        alert.informativeText = "Run `thane-cli --help` in any terminal to get started."
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+            // Check if symlink already points to the right place
+            if let existing = try? fm.destinationOfSymbolicLink(atPath: dst), existing == src {
+                NSLog("thane: \(tool) symlink already up to date")
+                continue
+            }
+
+            // Remove stale symlink or file
+            try? fm.removeItem(atPath: dst)
+
+            do {
+                try fm.createSymbolicLink(atPath: dst, withDestinationPath: src)
+                NSLog("thane: symlinked \(dst) → \(src)")
+            } catch {
+                // May fail without admin privileges — try via osascript
+                NSLog("thane: symlink failed (\(error)), trying with admin privileges...")
+                let script = "do shell script \"ln -sf '\(src)' '\(dst)'\" with administrator privileges"
+                if let appleScript = NSAppleScript(source: script) {
+                    var errorDict: NSDictionary?
+                    appleScript.executeAndReturnError(&errorDict)
+                    if let err = errorDict {
+                        NSLog("thane: admin symlink failed: \(err)")
+                    } else {
+                        NSLog("thane: symlinked \(dst) → \(src) (with admin)")
+                    }
+                }
+            }
+        }
     }
 
     private func checkCommand(_ command: String, args: [String]) -> Bool {
@@ -1082,80 +1080,234 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Old installDependencyChain / installHomebrew / installNodeJs / installClaudeCode removed.
     // Claude detection is now lazy — modal shown only when user opens a Claude-dependent panel.
 
-    private func injectClaudeMdIfNeeded() {
-        let claudeDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude")
-        let claudeMdPath = claudeDir.appendingPathComponent("CLAUDE.md")
+    /// Resolve the absolute path of the `claude` binary.
+    ///
+    /// Order: (1) `agent-claude-path` config override, (2) common install locations
+    /// including `~/.local/bin/claude` and NVM paths, (3) shell-resolved `which claude`
+    /// via a login zsh (matches the user's interactive PATH), (4) literal "claude".
+    ///
+    /// macOS .app bundles inherit launchd's minimal PATH, so we cannot rely on the
+    /// parent environment to find claude — this resolver is the source of truth.
+    static func resolveClaudeBinary(fm: FileManager, bridge: RustBridge) -> String {
+        if let override = bridge.configGet(key: "agent-claude-path"),
+           !override.isEmpty,
+           fm.fileExists(atPath: override) {
+            return override
+        }
 
-        let marker = "<!-- thane-agent-queue-instructions-v3 -->"
+        let home = fm.homeDirectoryForCurrentUser.path
+        var candidates: [String] = [
+            "/opt/homebrew/bin/claude",
+            "/usr/local/bin/claude",
+            "\(home)/.local/bin/claude",
+            "\(home)/.claude/local/claude",
+            "\(home)/.npm-global/bin/claude",
+            "\(home)/.bun/bin/claude",
+            "\(home)/.volta/bin/claude",
+        ]
 
-        // Check if already present
-        if let content = try? String(contentsOf: claudeMdPath, encoding: .utf8),
-           content.contains(marker) {
+        if let nvmEntries = try? fm.contentsOfDirectory(atPath: "\(home)/.nvm/versions/node") {
+            let sorted = nvmEntries.sorted(by: >)
+            candidates.append(contentsOf: sorted.map { "\(home)/.nvm/versions/node/\($0)/bin/claude" })
+        }
+
+        for path in candidates where fm.fileExists(atPath: path) {
+            return path
+        }
+
+        let shellResolver = Process()
+        shellResolver.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        shellResolver.arguments = ["-lc", "command -v claude"]
+        let pipe = Pipe()
+        shellResolver.standardOutput = pipe
+        shellResolver.standardError = Pipe()
+        do {
+            try shellResolver.run()
+            shellResolver.waitUntilExit()
+            if shellResolver.terminationStatus == 0,
+               let data = try? pipe.fileHandleForReading.readToEnd(),
+               let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !path.isEmpty,
+               fm.fileExists(atPath: path) {
+                return path
+            }
+        } catch {
+            NSLog("thane: shell-based claude lookup failed: \(error)")
+        }
+
+        NSLog("thane: could not resolve claude binary; falling back to 'claude' (may fail with Exit 127)")
+        return "claude"
+    }
+
+    /// Build a PATH covering common user-tool install locations so spawned subprocesses
+    /// (claude, git, node, etc.) can find their dependencies. The .app inherits launchd's
+    /// minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), so we prepend a curated set.
+    static func augmentedPath(existing: String?) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        var dirs = [
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "/usr/local/sbin",
+            "\(home)/.local/bin",
+            "\(home)/.cargo/bin",
+            "\(home)/.bun/bin",
+            "\(home)/.deno/bin",
+            "\(home)/.npm-global/bin",
+            "\(home)/.volta/bin",
+            "\(home)/.claude/local",
+        ]
+        if let nvmEntries = try? FileManager.default.contentsOfDirectory(atPath: "\(home)/.nvm/versions/node") {
+            let sorted = nvmEntries.sorted(by: >)
+            dirs.append(contentsOf: sorted.map { "\(home)/.nvm/versions/node/\($0)/bin" })
+        }
+        if let existing = existing, !existing.isEmpty {
+            dirs.append(existing)
+        } else {
+            dirs.append("/usr/bin")
+            dirs.append("/bin")
+            dirs.append("/usr/sbin")
+            dirs.append("/sbin")
+        }
+        // De-duplicate while preserving order.
+        var seen = Set<String>()
+        var out: [String] = []
+        for d in dirs where seen.insert(d).inserted {
+            out.append(d)
+        }
+        return out.joined(separator: ":")
+    }
+
+    // MARK: - Daemon setup
+    //
+    // Goal: `thane-cli queue submit ...` should work whether the user has
+    // opened the GUI or not. We achieve that by:
+    //   1. Installing a LaunchAgent on first launch (idempotent).
+    //   2. On each GUI launch, checking the socket — if a daemon is already
+    //      serving it, we step aside; if not, we spawn `thane-daemon` and let
+    //      it own the socket.
+
+    /// LaunchAgent label and plist path (must match thane-daemon's `launchd.rs`).
+    private static let daemonLaunchAgentLabel = "com.thane.daemon"
+    private static var daemonLaunchAgentPlistPath: String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return "\(home)/Library/LaunchAgents/com.thane.daemon.plist"
+    }
+
+    /// Locate the bundled `thane-daemon` binary (next to `thane-macos`).
+    private static func bundledDaemonBinary() -> String? {
+        let bundle = Bundle.main.bundlePath
+        let candidate = "\(bundle)/Contents/MacOS/thane-daemon"
+        if FileManager.default.fileExists(atPath: candidate) {
+            return candidate
+        }
+        // Dev / `swift run` layout — try the same directory as the running executable.
+        if let exe = Bundle.main.executableURL?.deletingLastPathComponent() {
+            let p = exe.appendingPathComponent("thane-daemon").path
+            if FileManager.default.fileExists(atPath: p) {
+                return p
+            }
+        }
+        return nil
+    }
+
+    /// Returns true if a daemon is currently accepting connections on the socket.
+    private func isDaemonRunningOnSocket() -> Bool {
+        let path = bridge.socketPath()
+        guard FileManager.default.fileExists(atPath: path) else { return false }
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = path.utf8CString
+        let sunPathSize = MemoryLayout.size(ofValue: addr.sun_path)
+        guard pathBytes.count <= sunPathSize else { return false }
+        withUnsafeMutablePointer(to: &addr.sun_path) { sunPath in
+            pathBytes.withUnsafeBufferPointer { buf in
+                _ = memcpy(sunPath, buf.baseAddress!, buf.count)
+            }
+        }
+        let addrLen = socklen_t(MemoryLayout<sa_family_t>.size + pathBytes.count)
+        let ok = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                connect(fd, sockPtr, addrLen) == 0
+            }
+        }
+        return ok
+    }
+
+    /// Install (and start) the LaunchAgent so `thane-daemon` runs at login.
+    /// Safe to call repeatedly — the daemon implements idempotent install.
+    private func installLaunchAgentIfNeeded() {
+        // Honor the "start at login" toggle if the user disabled it.
+        if let pref = bridge.configGet(key: "daemon-start-at-login"),
+           pref.lowercased() == "false" || pref == "0" {
             return
         }
-
-        // Build instructions block
-        let instructions = """
-
-        \(marker)
-        ## thane Agent Queue Integration
-
-        When running inside a thane terminal workspace, you have access to the thane agent queue. The `$THANE_SOCKET_PATH` environment variable is automatically set in all thane terminal sessions.
-
-        ### Submitting tasks to the agent queue
-
-        When the user asks you to add a plan to the thane queue, add tasks to the queue, or schedule work for later execution, use:
-
-        ```bash
-        echo "task description here" | thane-cli queue submit -
-        ```
-
-        Or write to a temp file for multi-line tasks:
-
-        ```bash
-        cat <<'TASK' > /tmp/thane-task.md
-        Your detailed task description here.
-        TASK
-        thane-cli queue submit /tmp/thane-task.md
-        ```
-
-        ### Queue management
-
-        - `thane-cli queue list` — list all queued tasks
-        - `thane-cli queue status <id>` — check a specific task
-        - `thane-cli queue cancel <id>` — cancel a queued task
-
-        ### Guidelines
-
-        - Only submit to the queue when the user explicitly asks (e.g., "add this plan to my thane queue", "add to the queue", "run this later")
-        - Include sufficient context in the task for an autonomous agent to execute it independently
-        - Each queued task runs as an independent Claude Code session
-        - When submitting tasks to the queue, always include the absolute working directory path where changes should be applied (e.g., "Working directory: /path/to/project"). Queue tasks run in isolated directories and need this context to locate the correct codebase.
-        """
-
-        do {
-            try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
-
-            var existing = (try? String(contentsOf: claudeMdPath, encoding: .utf8)) ?? ""
-
-            // Remove old v2 block if present
-            let oldMarker = "<!-- thane-agent-queue-instructions-v2 -->"
-            if let range = existing.range(of: oldMarker) {
-                existing = String(existing[existing.startIndex..<range.lowerBound])
-                    .trimmingCharacters(in: .newlines)
-            }
-
-            if !existing.isEmpty && !existing.hasSuffix("\n") {
-                existing += "\n"
-            }
-            existing += instructions
-
-            try existing.write(to: claudeMdPath, atomically: true, encoding: .utf8)
-            NSLog("thane: injected thane instructions into ~/.claude/CLAUDE.md")
-        } catch {
-            NSLog("thane: failed to inject CLAUDE.md instructions: \(error)")
+        if FileManager.default.fileExists(atPath: Self.daemonLaunchAgentPlistPath) {
+            return
         }
+        guard let bin = Self.bundledDaemonBinary() else {
+            NSLog("thane: bundled thane-daemon not found; skipping LaunchAgent install")
+            return
+        }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: bin)
+        proc.arguments = ["install-launch-agent"]
+        proc.standardOutput = Pipe()
+        proc.standardError = Pipe()
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            if proc.terminationStatus == 0 {
+                NSLog("thane: installed LaunchAgent at \(Self.daemonLaunchAgentPlistPath)")
+            } else {
+                NSLog("thane: install-launch-agent exited with status \(proc.terminationStatus)")
+            }
+        } catch {
+            NSLog("thane: failed to invoke install-launch-agent: \(error)")
+        }
+    }
+
+    /// Spawn `thane-daemon` as a detached background process.
+    /// Used when the LaunchAgent isn't installed yet or the daemon crashed.
+    private func spawnDaemon() -> Bool {
+        guard let bin = Self.bundledDaemonBinary() else { return false }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: bin)
+        proc.standardInput = nil
+        proc.standardOutput = nil
+        proc.standardError = nil
+        do {
+            try proc.run()
+            // Brief wait so the daemon can bind the socket before the GUI checks.
+            for _ in 0..<10 {
+                if isDaemonRunningOnSocket() { return true }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            return isDaemonRunningOnSocket()
+        } catch {
+            NSLog("thane: failed to spawn thane-daemon: \(error)")
+            return false
+        }
+    }
+
+    /// Make sure a daemon owns the IPC socket. Sets `daemonHandlesIpc` so
+    /// the rest of `applicationDidFinishLaunching` knows whether to start
+    /// its own in-process IPC server.
+    private func setUpDaemonIfNeeded() {
+        installLaunchAgentIfNeeded()
+        if isDaemonRunningOnSocket() {
+            daemonHandlesIpc = true
+            return
+        }
+        if spawnDaemon() {
+            daemonHandlesIpc = true
+            return
+        }
+        // No daemon and we couldn't spawn one — the GUI will own the socket.
+        daemonHandlesIpc = false
     }
 
     private func showSetupAlert(title: String, message: String) {

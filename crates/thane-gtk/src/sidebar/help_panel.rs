@@ -144,6 +144,38 @@ impl HelpPanel {
             ],
         );
 
+        // Phase 6b: Enterprise audit-logging section. Surfaces the relevant
+        // docs so end users on a managed install can see what their org's
+        // policy means without having to dig through markdown on disk.
+        let enterprise_title = gtk4::Label::new(Some("ENTERPRISE AUDIT LOGGING"));
+        enterprise_title.add_css_class("help-section-title");
+        enterprise_title.set_halign(gtk4::Align::Start);
+        enterprise_title.set_margin_top(8);
+        content.append(&enterprise_title);
+
+        let enterprise_body = gtk4::Label::new(Some(
+            "If your organization deploys a policy file, audit events may ship \
+             to a central Grafana Loki instance for security investigation. \
+             See AUDIT_LOG.md and ENTERPRISE.md (under dist/public/) for \
+             what is collected, how to query it in Grafana, and how an admin \
+             can deploy or remove the policy.",
+        ));
+        enterprise_body.add_css_class("help-tip");
+        enterprise_body.set_halign(gtk4::Align::Start);
+        enterprise_body.set_wrap(true);
+        enterprise_body.set_xalign(0.0);
+        content.append(&enterprise_body);
+
+        let cli_label = gtk4::Label::new(Some(
+            "CLI: `thane-cli enterprise status` shows the active policy; \
+             `thane-cli enterprise leave` (requires sudo) removes it.",
+        ));
+        cli_label.add_css_class("help-tip");
+        cli_label.set_halign(gtk4::Align::Start);
+        cli_label.set_wrap(true);
+        cli_label.set_xalign(0.0);
+        content.append(&cli_label);
+
         // Tips section.
         let tips_title = gtk4::Label::new(Some("TIPS"));
         tips_title.add_css_class("help-section-title");

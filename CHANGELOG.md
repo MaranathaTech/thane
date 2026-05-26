@@ -12,32 +12,100 @@ bottom of this file into a new section under `[Unreleased]`.
 
 ## [Unreleased]
 
+---
+
+## [0.1.0-beta.22] — 2026-05-25
+
 ### Added
 
-- Foundational enterprise documentation:
-  [`COMPLIANCE.md`](dist/public/COMPLIANCE.md) (control mapping for
-  SOC 2, ISO 27001, HIPAA, PCI-DSS v4, NIST 800-53 Rev. 5),
-  [`API.md`](dist/public/API.md) (full JSON-RPC method reference for the
-  51 methods exposed over the socket), and additional sections in
-  [`ENTERPRISE.md`](dist/public/ENTERPRISE.md) covering Kandji + Intune
-  MDM profiles, daemon-at-login operational guide, decommissioning
-  playbook, and a longer-form Loki + Grafana setup recipe.
-- `CHANGELOG.md` at the repo root following the Keep a Changelog format.
+- **Enterprise audit logging.** Every audit event now carries the OS
+  user (`system_user` / `system_uid`), is signed with HMAC-SHA256
+  alongside the SHA-256 hash chain, and (for rotated log files) is
+  encrypted at rest with AES-256-GCM. Keys live in macOS Keychain /
+  Linux Secret Service with HKDF-derived sub-keys.
+- **Offline audit verification.** New `thane-cli audit verify` checks
+  chain + signatures against a log directory. `thane-cli audit
+  export-key` / `import-key` let an auditor take the verification key
+  offline.
+- **PII and secret redaction.** Configurable policy
+  (`audit-redaction-policy` = `none` / `redact` / `strict`) scrubs
+  emails, SSNs, credit-card numbers (with Luhn check), and bearer
+  tokens for Anthropic, OpenAI, GitHub, AWS, Slack, and JWTs before
+  signing and persisting.
+- **Time-based retention.** `audit-retention-days` (default 90)
+  purges rotated audit files past the window. UI labels now reflect
+  the configured value instead of a hardcoded "7 days".
+- **Restricted log clearing.** `audit.clear` is gated behind
+  `audit-allow-clear` (default false) and requires a reason that lands
+  in the `AuditCleared` marker event.
+- **External log shipping (new `thane-audit-sink` crate).** Sink
+  framework with bounded in-memory queue, batched dispatch,
+  exponential-backoff retries, dead-letter file, and per-sink severity
+  + event-type filters. Six sinks shipping:
+  - **syslog** (RFC 5424 over TCP, optional TLS, octet-counting framing)
+  - **webhook** (HMAC-signed `X-Thane-Signature: t=<ts>,v1=<hex>`)
+  - **Amazon S3** (gzipped JSONL, SSE-S3 / SSE-KMS, optional Object
+    Lock for compliance retention, works against R2 / MinIO too)
+  - **Splunk HEC** (newline-delimited HEC events, configurable index)
+  - **Datadog Logs** (regional intake, configurable env / service /
+    ddtags)
+  - **Grafana Loki** (multi-tenant via `X-Scope-OrgID`, low-cardinality
+    stream labels, optional gzip, bearer / basic / mTLS auth)
+- **Enterprise policy override.** MDM-deployed `policy.json` at
+  `/Library/Application Support/thane/policy.json` (macOS) or
+  `/etc/thane/policy.json` (Linux) locks audit settings the end user
+  cannot disable. Locked-key indicators show in the settings UI with
+  an `issued_by` banner. macOS additionally honors Managed Preferences
+  (`/Library/Managed Preferences/com.thane.app.plist`).
+- **Self-service enrollment.** `thane-cli enterprise enroll <url>`,
+  `enterprise status`, `enterprise leave` for orgs deploying without
+  full MDM.
+- **Daemon at login (new `thane-daemon` crate).** Runs the IPC server
+  and queue executor without the GUI. macOS LaunchAgent installer
+  (`thane-daemon --install-launch-agent`) writes
+  `~/Library/LaunchAgents/com.thane.daemon.plist`. Linux equivalent
+  installs a systemd user unit
+  (`~/.config/systemd/user/thane-daemon.service`). GUI app detects the
+  external daemon and yields IPC / executor ownership to it.
+- **New CLI:** `thane-cli daemon start|stop|restart`, `thane-cli
+  system status` (daemon health + uptime + version), `thane-cli audit
+  dlq list|retry|clear` for inspecting the sink dead-letter queue.
+- **Queue execution prompt capture.** Headless `claude --print` queue
+  tasks now emit a `UserPrompt` audit event with the full prompt text
+  (gated by `audit-queue-prompts`, default on), matching the
+  interactive Claude Code session capture.
+- **Compliance + admin docs.** New
+  [`dist/public/AUDIT_LOG.md`](dist/public/AUDIT_LOG.md) (end-to-end
+  audit pipeline reference) plus expansions in
+  [`COMPLIANCE.md`](dist/public/COMPLIANCE.md),
+  [`API.md`](dist/public/API.md), and
+  [`ENTERPRISE.md`](dist/public/ENTERPRISE.md) (Kandji / Intune /
+  Munki / Jamf / Ansible MDM profiles, daemon-at-login operational
+  guide, decommissioning playbook, longer-form Loki + Grafana setup
+  recipe with sample LogQL queries).
+- `CHANGELOG.md` at the repo root following the Keep a Changelog
+  format.
 
 ### Changed
 
 - `~/.claude/CLAUDE.md` global instructions template bumped to v5:
-  dependency chaining is now opt-in (default is independent phase
-  submission), reversing the previous v4 default that auto-chained
-  every queued phase.
+  dependency chaining (`thane-cli queue submit --depends-on`) is now
+  opt-in. Default is independent phase submission, reversing the v4
+  behavior that auto-chained every queued phase. Bridge now injects
+  these instructions at startup on macOS (previously GTK-only).
+- Audit event schema: added `system_user`, `system_uid`, and `hmac`
+  fields. The hash chain now links event-N's `prev_hash` to the
+  *signed* HMAC of event-N-1 rather than the raw JSON, so an attacker
+  without the HMAC key cannot rewrite the chain.
+- `thane-cli queue cancel` / `queue status`: canonical parameter name
+  is now `entry_id`. The macOS RPC handler historically accepted only
+  `id`; both names are accepted now but only `entry_id` is documented.
 
 ### Fixed
 
-- macOS: `thane-cli queue cancel` and `queue status` now work end-to-end.
-  Previously the macOS RPC handler expected `id` while the CLI sent
-  `entry_id`, producing `Missing 'id' parameter`. Both names are now
-  accepted; `entry_id` is canonical and `id` is documented as a
-  deprecated fallback.
+- macOS: `thane-cli queue cancel` and `queue status` now work
+  end-to-end. The macOS RPC handler previously expected `id` while
+  the CLI sent `entry_id`, producing `Missing 'id' parameter`.
 - macOS: queue executor now terminates the running subprocess when an
   entry is cancelled. Previously the cancel only flipped the status
   flag, leaving the `claude` subprocess running until it finished on
@@ -47,7 +115,7 @@ bottom of this file into a new section under `[Unreleased]`.
   (`~/.local/bin`, NVM versions, Homebrew paths, `~/.cargo/bin`, plus a
   `zsh -lc 'command -v claude'` fallback). Fixes Exit 127 failures
   when launchd's minimal PATH did not include the user's tool install
-  location.
+  location. Configurable override via `agent-claude-path`.
 - macOS: spawned queue subprocesses now receive an augmented PATH
   covering Homebrew (Intel + Apple Silicon), `/usr/local`,
   `~/.local/bin`, `~/.cargo/bin`, NVM, etc.
@@ -58,7 +126,9 @@ bottom of this file into a new section under `[Unreleased]`.
 ### Removed
 
 - Dead Swift duplicate of the CLAUDE.md injector in `AppDelegate.swift`
-  (was using a stale v3 marker).
+  (was using a stale v3 marker; the canonical injector is
+  `crates/thane-platform/src/claude_md.rs`, now wired into both the
+  GTK setup path and the macOS bridge).
 
 ---
 
